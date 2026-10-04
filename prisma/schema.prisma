@@ -1,0 +1,207 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  BUYER
+  SELLER
+  ADMIN
+}
+
+enum StoreStatus {
+  PENDING_APPROVAL
+  APPROVED
+  SUSPENDED
+  REJECTED
+}
+
+enum ProductStatus {
+  DRAFT
+  PENDING_REVIEW
+  PUBLISHED
+  OUT_OF_STOCK
+  ARCHIVED
+}
+
+enum OrderStatus {
+  PAYMENT_PENDING
+  PAID
+  CANCELLED
+}
+
+enum SubOrderStatus {
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+model User {
+  id            String         @id @default(cuid())
+  name          String?
+  email         String         @unique
+  passwordHash  String?
+  role          Role           @default(BUYER)
+  image         String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  sellerProfile SellerProfile?
+  orders        Order[]        @relation("BuyerOrders")
+  reviews       Review[]
+}
+
+model SellerProfile {
+  id                String       @id @default(cuid())
+  userId            String       @unique
+  user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storeName         String       @unique
+  storeSlug         String       @unique
+  description       String?
+  logoUrl           String?
+  bannerUrl         String?
+  status            StoreStatus  @default(PENDING_APPROVAL)
+  commissionRate    Float        @default(0.10) // 10% platform fee default
+  stripeAccountId   String?
+  payoutsEnabled    Boolean      @default(false)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  products          Product[]
+  subOrders         SubOrder[]
+  payouts           PayoutRecord[]
+
+  @@index([status])
+}
+
+model Category {
+  id          String     @id @default(cuid())
+  name        String     @unique
+  slug        String     @unique
+  description String?
+  imageUrl    String?
+  products    Product[]
+}
+
+model Product {
+  id             String         @id @default(cuid())
+  sellerId       String
+  seller         SellerProfile  @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  categoryId     String
+  category       Category       @relation(fields: [categoryId], references: [id])
+  title          String
+  slug           String         @unique
+  description    String
+  price          Decimal        @db.Decimal(10, 2)
+  comparePrice   Decimal?       @db.Decimal(10, 2)
+  inventoryCount Int            @default(0)
+  status         ProductStatus  @default(PUBLISHED)
+  featured       Boolean        @default(false)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  images         ProductImage[]
+  orderItems     OrderItem[]
+  reviews        Review[]
+
+  @@index([sellerId])
+  @@index([categoryId])
+  @@index([status])
+}
+
+model ProductImage {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  altText   String?
+  sortOrder Int      @default(0)
+
+  @@index([productId])
+}
+
+model Order {
+  id                    String         @id @default(cuid())
+  buyerId               String
+  buyer                 User           @relation("BuyerOrders", fields: [buyerId], references: [id])
+  totalAmount           Decimal        @db.Decimal(10, 2)
+  stripeSessionId       String?        @unique
+  stripePaymentIntentId String?
+  paymentStatus         OrderStatus    @default(PAYMENT_PENDING)
+  shippingAddress       Json
+  createdAt             DateTime       @default(now())
+
+  subOrders             SubOrder[]
+
+  @@index([buyerId])
+}
+
+model SubOrder {
+  id               String         @id @default(cuid())
+  orderId          String
+  order            Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sellerId         String
+  seller           SellerProfile  @relation(fields: [sellerId], references: [id])
+  subtotal         Decimal        @db.Decimal(10, 2)
+  commissionAmount Decimal        @db.Decimal(10, 2)
+  sellerPayout     Decimal        @db.Decimal(10, 2)
+  status           SubOrderStatus @default(PROCESSING)
+  trackingNumber   String?
+  carrierName      String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  items            OrderItem[]
+  payoutRecord     PayoutRecord?
+
+  @@index([orderId])
+  @@index([sellerId])
+  @@index([status])
+}
+
+model OrderItem {
+  id         String   @id @default(cuid())
+  subOrderId String
+  subOrder   SubOrder @relation(fields: [subOrderId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  quantity   Int
+  unitPrice  Decimal  @db.Decimal(10, 2)
+
+  @@index([subOrderId])
+  @@index([productId])
+}
+
+model Review {
+  id          String   @id @default(cuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  buyerId     String
+  buyer       User     @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  rating      Int      // 1 to 5
+  comment     String?
+  createdAt   DateTime @default(now())
+
+  @@unique([productId, buyerId])
+  @@index([productId])
+}
+
+model PayoutRecord {
+  id               String        @id @default(cuid())
+  sellerId         String
+  seller           SellerProfile @relation(fields: [sellerId], references: [id])
+  subOrderId       String        @unique
+  subOrder         SubOrder      @relation(fields: [subOrderId], references: [id])
+  amount           Decimal       @db.Decimal(10, 2)
+  stripeTransferId String?
+  status           String        @default("PENDING") // PENDING, TRANSFERRED, FAILED
+  createdAt        DateTime      @default(now())
+
+  @@index([sellerId])
+}
