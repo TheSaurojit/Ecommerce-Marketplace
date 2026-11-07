@@ -249,7 +249,6 @@ function SellerDashboardContent() {
           inventoryCount: parseInt(productForm.inventoryCount, 10),
           categoryId: productForm.categoryId || categories[0]?.id,
           images: [productForm.imageUrl],
-          featured: productForm.featured,
         },
       });
 
@@ -322,7 +321,6 @@ function SellerDashboardContent() {
           categoryId: editForm.categoryId,
           status: editForm.status,
           images: editForm.imageUrl ? [editForm.imageUrl] : undefined,
-          featured: editForm.featured,
         },
       });
 
@@ -1320,18 +1318,7 @@ function SellerDashboardContent() {
                 />
               </div>
 
-              <div className="flex items-center space-x-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="newFeatured"
-                  checked={productForm.featured}
-                  onChange={(e) => setProductForm({ ...productForm, featured: e.target.checked })}
-                  className="rounded border-slate-300 text-violet-600 focus:ring-violet-500"
-                />
-                <label htmlFor="newFeatured" className="font-semibold text-slate-700">
-                  Feature this product on marketplace homepage
-                </label>
-              </div>
+
 
               <div className="pt-3 flex justify-end space-x-3 border-t border-slate-100">
                 <button
@@ -1418,7 +1405,10 @@ function SellerDashboardContent() {
                     }
                     className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:bg-white text-slate-900 font-bold"
                   >
-                    <option value="PUBLISHED">PUBLISHED (Active on Store)</option>
+                    {editingProduct?.status === "PUBLISHED" && (
+                      <option value="PUBLISHED">PUBLISHED (Active on Store)</option>
+                    )}
+                    <option value="PENDING_REVIEW">PENDING REVIEW (Submit for Admin Approval)</option>
                     <option value="DRAFT">DRAFT (Hidden from Buyers)</option>
                     <option value="OUT_OF_STOCK">OUT OF STOCK</option>
                     <option value="ARCHIVED">ARCHIVED</option>
@@ -1482,18 +1472,7 @@ function SellerDashboardContent() {
                 />
               </div>
 
-              <div className="flex items-center space-x-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="editFeatured"
-                  checked={editForm.featured}
-                  onChange={(e) => setEditForm({ ...editForm, featured: e.target.checked })}
-                  className="rounded border-slate-300 text-violet-600 focus:ring-violet-500"
-                />
-                <label htmlFor="editFeatured" className="font-semibold text-slate-700">
-                  Feature this product on homepage
-                </label>
-              </div>
+
 
               <div className="pt-3 flex justify-end space-x-3 border-t border-slate-100">
                 <button

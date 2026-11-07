@@ -198,16 +198,20 @@ export const adminRoutes = new Hono<Env>()
     zValidator(
       "json",
       z.object({
-        status: z.enum(["PUBLISHED", "ARCHIVED", "PENDING_REVIEW"]),
+        status: z.enum(["PUBLISHED", "ARCHIVED", "PENDING_REVIEW"]).optional(),
+        featured: z.boolean().optional(),
       })
     ),
     async (c) => {
       const id = c.req.param("id");
-      const { status } = c.req.valid("json");
+      const { status, featured } = c.req.valid("json");
 
       const product = await db.product.update({
         where: { id },
-        data: { status },
+        data: {
+          ...(status ? { status } : {}),
+          ...(featured !== undefined ? { featured } : {}),
+        },
       });
 
       return c.json({ success: true, product });

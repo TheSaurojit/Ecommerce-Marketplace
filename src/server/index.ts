@@ -72,11 +72,20 @@ app.onError((err, c) => {
       400
     );
   }
+  if (prismaCode === "P2003") {
+    return c.json(
+      { error: "Invalid foreign key: A referenced record does not exist." },
+      400
+    );
+  }
   if (prismaCode === "P2025") {
     return c.json({ error: "The requested record was not found." }, 404);
   }
   if (typeof prismaCode === "string" && prismaCode.startsWith("P")) {
     return c.json({ error: "A database error occurred while processing your request." }, 400);
+  }
+  if (err.name === "PrismaClientValidationError") {
+    return c.json({ error: "Invalid database query parameters." }, 400);
   }
 
   // Handle Zod validation errors
@@ -98,11 +107,9 @@ app.onError((err, c) => {
     );
   }
 
-  const isDev = process.env.NODE_ENV === "development";
   return c.json(
     {
-      error: isDev ? err.message : "Internal Server Error",
-      ...(isDev && err.stack ? { stack: err.stack } : {}),
+      error: "Internal Server Error",
     },
     500
   );

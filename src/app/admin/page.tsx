@@ -158,6 +158,24 @@ function AdminDashboardContent() {
     }
   };
 
+  // Toggle featured slot (Admin only)
+  const handleToggleFeatured = async (productId: string, featured: boolean) => {
+    try {
+      const res = await client.api.admin.products[":id"].status.$patch({
+        param: { id: productId },
+        json: { featured },
+      });
+
+      if (res.ok) {
+        setProducts((prev) =>
+          prev.map((p) => (p.id === productId ? { ...p, featured } : p))
+        );
+      }
+    } catch {
+      alert("Error updating featured status");
+    }
+  };
+
   // Disburse Payout to Seller
   const handleDisbursePayout = async (payoutId: string) => {
     setDisbursingId(payoutId);
@@ -399,6 +417,7 @@ function AdminDashboardContent() {
                     <th className="py-3 px-6">Category</th>
                     <th className="py-3 px-6">Price</th>
                     <th className="py-3 px-6">Status</th>
+                    <th className="py-3 px-6 text-center">Featured</th>
                     <th className="py-3 px-6 text-right">Moderation</th>
                   </tr>
                 </thead>
@@ -423,6 +442,18 @@ function AdminDashboardContent() {
                         >
                           {p.status}
                         </span>
+                      </td>
+                      <td className="py-4 px-6 text-center">
+                        <button
+                          onClick={() => handleToggleFeatured(p.id, !p.featured)}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors ${
+                            p.featured
+                              ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30"
+                              : "bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700"
+                          }`}
+                        >
+                          {p.featured ? "★ Featured" : "☆ Feature"}
+                        </button>
                       </td>
                       <td className="py-4 px-6 text-right">
                         {p.status === "PUBLISHED" ? (

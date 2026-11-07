@@ -17,12 +17,15 @@ export default async function HomePage() {
   const [categories, featuredProducts, sellers] = await Promise.all([
     db.category.findMany({
       include: {
-        _count: { select: { products: { where: { status: "PUBLISHED" } } } },
+        _count: { select: { products: { where: { status: "PUBLISHED", seller: { status: "APPROVED" } } } } },
       },
       take: 6,
     }),
     db.product.findMany({
-      where: { status: "PUBLISHED" },
+      where: {
+        status: "PUBLISHED",
+        seller: { status: "APPROVED" },
+      },
       include: {
         images: { orderBy: { sortOrder: "asc" } },
         category: true,

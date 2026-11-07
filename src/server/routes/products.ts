@@ -61,6 +61,17 @@ export const productRoutes = new Hono<Env>()
         where.status = "PUBLISHED";
       }
 
+      const sellerFilter: any = {};
+      if (storeSlug) {
+        sellerFilter.storeSlug = storeSlug;
+      }
+      if (!isAuthorizedOwnerOrAdmin) {
+        sellerFilter.status = "APPROVED";
+      }
+      if (Object.keys(sellerFilter).length > 0) {
+        where.seller = sellerFilter;
+      }
+
       if (q) {
         where.OR = [
           { title: { contains: q, mode: "insensitive" } },
@@ -71,12 +82,6 @@ export const productRoutes = new Hono<Env>()
       if (category) {
         where.category = {
           slug: category,
-        };
-      }
-
-      if (storeSlug) {
-        where.seller = {
-          storeSlug: storeSlug,
         };
       }
 
@@ -284,6 +289,7 @@ export const productRoutes = new Hono<Env>()
             description: true,
             logoUrl: true,
             bannerUrl: true,
+            status: true,
           },
         },
         reviews: {
@@ -299,14 +305,19 @@ export const productRoutes = new Hono<Env>()
       return c.json({ error: "Product not found" }, 404);
     }
 
-    // Access control: DRAFT, PENDING_REVIEW, and ARCHIVED products are strictly private to the owner and admins
+    // Access control: Non-public listings and suspended seller catalogs are strictly private to the owner and admins
     const currentUser = c.get("user");
     const isOwnerOrAdmin =
       currentUser &&
       (currentUser.role === "ADMIN" || currentUser.sellerProfileId === product.seller.id);
 
-    if (!isOwnerOrAdmin && product.status !== "PUBLISHED" && product.status !== "OUT_OF_STOCK") {
-      return c.json({ error: "Product not found or is currently unavailable" }, 404);
+    if (!isOwnerOrAdmin) {
+      if (
+        (product.status !== "PUBLISHED" && product.status !== "OUT_OF_STOCK") ||
+        product.seller.status !== "APPROVED"
+      ) {
+        return c.json({ error: "Product not found or is currently unavailable" }, 404);
+      }
     }
 
     const ratingCount = product.reviews.length;
@@ -386,64 +397,61 @@ export const productRoutes = new Hono<Env>()
             message: "Invalid product status",
           })
           .optional()
-          .default("PUBLISHED"),
+          .default("PENDING_REVIEW"),
       }),
       formatZodErrorHook
     ),
     async (c) => {
-      try {
-        const user = c.get("user")!;
-        const data = c.req.valid("json");
+      const user = c.get("user")!;
+      const data = c.req.valid("json");
+      const isAdmin = user.role === "ADMIN";
 
-        // Verify seller profile exists
-        let sellerProfileId = user.sellerProfileId;
-        if (!sellerProfileId) {
-          const profile = await db.sellerProfile.findUnique({ where: { userId: user.userId } });
-          if (!profile) return c.json({ error: "Seller profile not found. Please apply for a merchant account first." }, 404);
-          sellerProfileId = profile.id;
-        }
-
-        const uniqueSlug = await generateUniqueProductSlug(db, data.title);
-
-        const newProduct = await db.product.create({
-          data: {
-            sellerId: sellerProfileId,
-            categoryId: data.categoryId,
-            title: data.title,
-            slug: uniqueSlug,
-            description: data.description,
-            price: data.price,
-            comparePrice: data.comparePrice ?? null,
-            inventoryCount: data.inventoryCount,
-            status: data.status,
-            featured: data.featured,
-            images: {
-              create: data.images.map((url, idx) => ({
-                url,
-                sortOrder: idx,
-                altText: `${data.title} image ${idx + 1}`,
-              })),
-            },
-          },
-          include: {
-            images: true,
-            category: true,
-          },
-        });
-
-        return c.json({ success: true, product: newProduct }, 201);
-      } catch (err: unknown) {
-        console.error("Failed to create product:", err);
-        return c.json(
-          {
-            error:
-              err instanceof Error
-                ? err.message
-                : "An unexpected error occurred while creating the product listing.",
-          },
-          500
-        );
+      // Verify seller profile exists
+      let sellerProfileId = user.sellerProfileId;
+      if (!sellerProfileId) {
+        const profile = await db.sellerProfile.findUnique({ where: { userId: user.userId } });
+        if (!profile) return c.json({ error: "Seller profile not found. Please apply for a merchant account first." }, 404);
+        sellerProfileId = profile.id;
       }
+
+      // Moderation enforcement: New products default to PENDING_REVIEW; sellers cannot set PUBLISHED directly
+      let initialStatus = data.status || "PENDING_REVIEW";
+      if (!isAdmin && initialStatus !== "DRAFT") {
+        initialStatus = "PENDING_REVIEW";
+      }
+
+      // Featured is strictly admin-only
+      const isFeatured = isAdmin ? Boolean(data.featured) : false;
+
+      const uniqueSlug = await generateUniqueProductSlug(db, data.title);
+
+      const newProduct = await db.product.create({
+        data: {
+          sellerId: sellerProfileId,
+          categoryId: data.categoryId,
+          title: data.title,
+          slug: uniqueSlug,
+          description: data.description,
+          price: data.price,
+          comparePrice: data.comparePrice ?? null,
+          inventoryCount: data.inventoryCount,
+          status: initialStatus,
+          featured: isFeatured,
+          images: {
+            create: data.images.map((url, idx) => ({
+              url,
+              sortOrder: idx,
+              altText: `${data.title} image ${idx + 1}`,
+            })),
+          },
+        },
+        include: {
+          images: true,
+          category: true,
+        },
+      });
+
+      return c.json({ success: true, product: newProduct }, 201);
     }
   )
 
@@ -514,6 +522,23 @@ export const productRoutes = new Hono<Env>()
         return c.json({ error: "Forbidden: You can only edit your own products" }, 403);
       }
 
+      const isAdmin = user.role === "ADMIN";
+
+      // Featured is strictly admin-only
+      const featuredUpdate = isAdmin && data.featured !== undefined ? { featured: data.featured } : {};
+
+      // Sellers cannot transition an unapproved product to PUBLISHED
+      let statusUpdate = {};
+      if (data.status) {
+        if (!isAdmin && data.status === "PUBLISHED" && existing.status !== "PUBLISHED") {
+          statusUpdate = { status: "PENDING_REVIEW" };
+        } else if (!isAdmin && data.status === "PUBLISHED") {
+          statusUpdate = { status: existing.status };
+        } else {
+          statusUpdate = { status: data.status };
+        }
+      }
+
       // Atomic Transaction: Ensure image replacement and details update succeed or fail together
       const updated = await db.$transaction(async (tx) => {
         if (data.images) {
@@ -537,8 +562,8 @@ export const productRoutes = new Hono<Env>()
             ...(data.comparePrice !== undefined ? { comparePrice: data.comparePrice } : {}),
             ...(data.inventoryCount !== undefined ? { inventoryCount: data.inventoryCount } : {}),
             ...(data.categoryId ? { categoryId: data.categoryId } : {}),
-            ...(data.status ? { status: data.status } : {}),
-            ...(data.featured !== undefined ? { featured: data.featured } : {}),
+            ...statusUpdate,
+            ...featuredUpdate,
           },
           include: {
             images: { orderBy: { sortOrder: "asc" } },

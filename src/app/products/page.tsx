@@ -27,8 +27,16 @@ export default async function ProductsPage({ searchParams }: ProductsPageProps) 
   const sort = params.sort || "newest";
 
   // Build Prisma filter
+  const sellerFilter: Prisma.SellerProfileWhereInput = {
+    status: "APPROVED",
+  };
+  if (storeSlug) {
+    sellerFilter.storeSlug = storeSlug;
+  }
+
   const where: Prisma.ProductWhereInput = {
     status: "PUBLISHED",
+    seller: sellerFilter,
   };
 
   if (q) {
@@ -40,10 +48,6 @@ export default async function ProductsPage({ searchParams }: ProductsPageProps) 
 
   if (categorySlug) {
     where.category = { slug: categorySlug };
-  }
-
-  if (storeSlug) {
-    where.seller = { storeSlug };
   }
 
   if (minPrice !== undefined || maxPrice !== undefined) {

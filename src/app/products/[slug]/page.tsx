@@ -26,6 +26,7 @@ export default async function ProductPage({ params }: ProductPageProps) {
           description: true,
           logoUrl: true,
           bannerUrl: true,
+          status: true,
         },
       },
       reviews: {
@@ -37,7 +38,11 @@ export default async function ProductPage({ params }: ProductPageProps) {
     },
   });
 
-  if (!product || (product.status !== "PUBLISHED" && product.status !== "OUT_OF_STOCK")) {
+  if (
+    !product ||
+    (product.status !== "PUBLISHED" && product.status !== "OUT_OF_STOCK") ||
+    product.seller.status !== "APPROVED"
+  ) {
     notFound();
   }
 

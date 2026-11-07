@@ -26,63 +26,52 @@ export const uploadRoutes = new Hono<Env>()
 
   // Upload an image file (multipart/form-data)
   .post("/", requireAuth, async (c) => {
-    try {
-      const body = await c.req.parseBody();
-      const file = body["file"];
+    const body = await c.req.parseBody();
+    const file = body["file"];
 
-      if (!file || typeof file === "string") {
-        return c.json({ error: "No file was uploaded or invalid file format" }, 400);
-      }
+    if (!file || typeof file === "string") {
+      return c.json({ error: "No file was uploaded or invalid file format" }, 400);
+    }
 
-      // Check if file is a File/Blob instance
-      if (!(file instanceof File)) {
-        return c.json({ error: "Uploaded payload is not a valid file" }, 400);
-      }
+    // Check if file is a File/Blob instance
+    if (!(file instanceof File)) {
+      return c.json({ error: "Uploaded payload is not a valid file" }, 400);
+    }
 
-      if (!ALLOWED_MIME_TYPES.includes(file.type)) {
-        return c.json(
-          {
-            error: `Unsupported file type: ${file.type}. Allowed formats: JPG, PNG, WEBP, GIF, SVG`,
-          },
-          400
-        );
-      }
-
-      if (file.size > MAX_FILE_SIZE) {
-        return c.json(
-          {
-            error: `File is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed is 10MB.`,
-          },
-          400
-        );
-      }
-
-      const folder = typeof body["folder"] === "string" ? body["folder"] : "products";
-      const arrayBuffer = await file.arrayBuffer();
-
-      const uploadResult = await uploadToSupabaseStorage({
-        fileBuffer: arrayBuffer,
-        fileName: file.name,
-        contentType: file.type,
-        folder,
-      });
-
-      return c.json({
-        success: true,
-        url: uploadResult.url,
-        path: uploadResult.path,
-        fileName: file.name,
-        fileSize: file.size,
-        contentType: file.type,
-      });
-    } catch (err: unknown) {
-      console.error("[Upload Handler Error]:", err);
+    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
       return c.json(
         {
-          error:
-            err instanceof Error ? err.message : "Failed to process image upload",
+          error: `Unsupported file type: ${file.type}. Allowed formats: JPG, PNG, WEBP, GIF, SVG`,
         },
-        500
+        400
       );
     }
+
+    if (file.size > MAX_FILE_SIZE) {
+      return c.json(
+        {
+          error: `File is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed is 10MB.`,
+        },
+        400
+      );
+    }
+
+    const folder = typeof body["folder"] === "string" ? body["folder"] : "products";
+    const arrayBuffer = await file.arrayBuffer();
+
+    const uploadResult = await uploadToSupabaseStorage({
+      fileBuffer: arrayBuffer,
+      fileName: file.name,
+      contentType: file.type,
+      folder,
+    });
+
+    return c.json({
+      success: true,
+      url: uploadResult.url,
+      path: uploadResult.path,
+      fileName: file.name,
+      fileSize: file.size,
+      contentType: file.type,
+    });
   });
