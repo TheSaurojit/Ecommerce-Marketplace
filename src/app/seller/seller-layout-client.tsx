@@ -149,7 +149,7 @@ export function SellerLayoutClient({ children }: { children: React.ReactNode }) 
               Platform Fee
             </span>
             <span className="text-white font-bold">
-              {(Number(user?.sellerProfile?.commissionRate || 0.1) * 100).toFixed(0)}% Marketplace Split
+              {(Number(user?.sellerProfile?.commissionRate ?? 0.1) * 100).toFixed(0)}% Marketplace Split
             </span>
           </div>
 

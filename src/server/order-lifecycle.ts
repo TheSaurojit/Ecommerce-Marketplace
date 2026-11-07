@@ -48,15 +48,24 @@ export async function markOrderPaid(
 
 export async function cancelPendingOrder(
   orderId: string,
-  stripeSessionId: string
+  stripeSessionId?: string | null
 ): Promise<boolean> {
   return db.$transaction(async (tx) => {
+    const where: {
+      id: string;
+      paymentStatus: "PAYMENT_PENDING";
+      stripeSessionId?: string | null;
+    } = {
+      id: orderId,
+      paymentStatus: "PAYMENT_PENDING",
+    };
+
+    if (stripeSessionId !== undefined) {
+      where.stripeSessionId = stripeSessionId;
+    }
+
     const result = await tx.order.updateMany({
-      where: {
-        id: orderId,
-        stripeSessionId,
-        paymentStatus: "PAYMENT_PENDING",
-      },
+      where,
       data: { paymentStatus: "CANCELLED" },
     });
 

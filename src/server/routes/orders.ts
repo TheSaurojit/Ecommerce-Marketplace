@@ -140,7 +140,7 @@ export const orderRoutes = new Hono<Env>()
       // Calculate commission & payouts for each seller and aggregate order total
       let orderTotal = 0;
       for (const group of sellerGroups.values()) {
-        const commissionRate = group.seller.commissionRate || 0.1;
+        const commissionRate = Number(group.seller.commissionRate ?? 0.1);
         group.commissionAmount = Math.round(group.subtotal * commissionRate * 100) / 100;
         group.sellerPayout = Math.round((group.subtotal - group.commissionAmount) * 100) / 100;
         orderTotal = Math.round((orderTotal + group.subtotal) * 100) / 100;
@@ -156,13 +156,13 @@ export const orderRoutes = new Hono<Env>()
         );
       }
 
-      // Execute Atomic Database Transaction with Concurrency-Safe Stock Reservation
-      try {
-        let checkoutSessionUrl: string | null = null;
-        let checkoutSessionId: string | null = null;
+      // Step 1: Commit reservation and pending orders inside DB transaction FIRST
+      let parentOrderId: string;
+      let createdSubOrderCount: number;
 
+      try {
         const result = await db.$transaction(async (tx) => {
-          // 1. Concurrency-Safe Atomic Stock Reservation (Executed FIRST)
+          // Concurrency-Safe Atomic Stock Reservation (Executed FIRST)
           for (const item of consolidatedItems) {
             const updateResult = await tx.product.updateMany({
               where: {
@@ -183,7 +183,7 @@ export const orderRoutes = new Hono<Env>()
             }
           }
 
-          // 2. Create Parent Order
+          // Create Parent Order
           const parentOrder = await tx.order.create({
             data: {
               buyerId: user.userId,
@@ -193,11 +193,11 @@ export const orderRoutes = new Hono<Env>()
             },
           });
 
-          const createdSubOrders = [];
+          let subOrderCount = 0;
 
-          // 3. Create Sub-Orders for each Seller (PayoutRecords will be created upon payment confirmation in markOrderPaid)
+          // Create Sub-Orders for each Seller (PayoutRecords will be created upon payment confirmation in markOrderPaid)
           for (const [sellerId, group] of sellerGroups.entries()) {
-            const subOrder = await tx.subOrder.create({
+            await tx.subOrder.create({
               data: {
                 orderId: parentOrder.id,
                 sellerId: sellerId,
@@ -213,61 +213,16 @@ export const orderRoutes = new Hono<Env>()
                   })),
                 },
               },
-              include: {
-                items: { include: { product: true } },
-              },
             });
 
-            createdSubOrders.push(subOrder);
+            subOrderCount++;
           }
 
-          // 4. Initialize Stripe Checkout Session
-          const stripeItems = consolidatedItems.map((i) => {
-            const prod = dbProducts.find((p) => p.id === i.productId)!;
-            return {
-              title: prod.title,
-              unitPrice: Number(prod.price),
-              quantity: i.quantity,
-              imageUrl: prod.images?.[0]?.url,
-              storeName: prod.seller.storeName,
-            };
-          });
-
-          const session = await createStripeCheckoutSession({
-            orderId: parentOrder.id,
-            buyerEmail: user.email,
-            buyerId: user.userId,
-            items: stripeItems,
-            appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
-          });
-
-          if (!session || !session.url) {
-            throw new Error("Failed to initialize Stripe Checkout session.");
-          }
-
-          checkoutSessionUrl = session.url;
-          checkoutSessionId = session.sessionId;
-
-          await tx.order.update({
-            where: { id: parentOrder.id },
-            data: { stripeSessionId: session.sessionId },
-          });
-
-          return { parentOrder, subOrders: createdSubOrders };
+          return { parentOrderId: parentOrder.id, subOrderCount };
         });
 
-        return c.json(
-          {
-            success: true,
-            message: "Stripe Checkout session initialized",
-            orderId: result.parentOrder.id,
-            subOrderCount: result.subOrders.length,
-            totalAmount: orderTotal,
-            checkoutUrl: checkoutSessionUrl,
-            stripeSessionId: checkoutSessionId,
-          },
-          201
-        );
+        parentOrderId = result.parentOrderId;
+        createdSubOrderCount = result.subOrderCount;
       } catch (err: unknown) {
         return c.json(
           {
@@ -277,6 +232,64 @@ export const orderRoutes = new Hono<Env>()
                 : "Failed to complete checkout due to inventory changes. Please refresh and try again.",
           },
           400
+        );
+      }
+
+      // Step 2: Initialize Stripe Checkout Session OUTSIDE the DB transaction
+      try {
+        const stripeItems = consolidatedItems.map((i) => {
+          const prod = dbProducts.find((p) => p.id === i.productId)!;
+          return {
+            title: prod.title,
+            unitPrice: Number(prod.price),
+            quantity: i.quantity,
+            imageUrl: prod.images?.[0]?.url,
+            storeName: prod.seller.storeName,
+          };
+        });
+
+        const session = await createStripeCheckoutSession({
+          orderId: parentOrderId,
+          buyerEmail: user.email,
+          buyerId: user.userId,
+          items: stripeItems,
+          appUrl: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
+        });
+
+        if (!session || !session.url || !session.sessionId) {
+          throw new Error("Failed to initialize Stripe Checkout session.");
+        }
+
+        // Attach stripeSessionId to the committed parent order
+        await db.order.update({
+          where: { id: parentOrderId },
+          data: { stripeSessionId: session.sessionId },
+        });
+
+        return c.json(
+          {
+            success: true,
+            message: "Stripe Checkout session initialized",
+            orderId: parentOrderId,
+            subOrderCount: createdSubOrderCount,
+            totalAmount: orderTotal,
+            checkoutUrl: session.url,
+            stripeSessionId: session.sessionId,
+          },
+          201
+        );
+      } catch (err: unknown) {
+        // If session creation fails, rollback the pending order and restore inventory
+        await cancelPendingOrder(parentOrderId);
+
+        return c.json(
+          {
+            error:
+              err instanceof Error
+                ? err.message
+                : "Payment provider error: Failed to initialize checkout session. Inventory has been restored.",
+          },
+          500
         );
       }
     }

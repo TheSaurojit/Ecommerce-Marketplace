@@ -67,7 +67,7 @@ model SellerProfile {
   logoUrl           String?
   bannerUrl         String?
   status            StoreStatus  @default(PENDING_APPROVAL)
-  commissionRate    Float        @default(0.10) // 10% platform fee default
+  commissionRate    Decimal      @default(0.10) @db.Decimal(10, 4) // 10% platform fee default
   stripeAccountId   String?
   payoutsEnabled    Boolean      @default(false)
   createdAt         DateTime     @default(now())

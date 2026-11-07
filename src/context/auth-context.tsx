@@ -15,7 +15,7 @@ export interface UserSession {
     status: "PENDING_APPROVAL" | "APPROVED" | "REJECTED" | "SUSPENDED";
     logoUrl?: string | null;
     bannerUrl?: string | null;
-    commissionRate: number;
+    commissionRate: number | string;
   } | null;
 }
 
