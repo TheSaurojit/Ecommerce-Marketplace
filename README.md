@@ -162,6 +162,7 @@ The seed script creates ready-to-use accounts for each user role:
 | `npm run build` | Compiles the production build |
 | `npm run start` | Starts the production server |
 | `npm run lint` | Runs ESLint check across all files |
+| `npm test` | Runs the Vitest integration test suite (checkout, pay, cancel lifecycle) |
 | `npm run db:migrate` | Creates and applies new migrations during development (`prisma migrate dev`) |
 | `npm run db:deploy` | Applies all pending migrations in production / CI (`prisma migrate deploy`) |
 | `npm run db:push` | Pushes the Prisma schema state directly to the database without migrations |

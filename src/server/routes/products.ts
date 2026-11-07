@@ -61,7 +61,7 @@ export const productRoutes = new Hono<Env>()
         where.status = "PUBLISHED";
       }
 
-      const sellerFilter: any = {};
+      const sellerFilter: Record<string, unknown> = {};
       if (storeSlug) {
         sellerFilter.storeSlug = storeSlug;
       }
@@ -69,7 +69,7 @@ export const productRoutes = new Hono<Env>()
         sellerFilter.status = "APPROVED";
       }
       if (Object.keys(sellerFilter).length > 0) {
-        where.seller = sellerFilter;
+        where.seller = sellerFilter as ProductWhereInput["seller"];
       }
 
       if (q) {

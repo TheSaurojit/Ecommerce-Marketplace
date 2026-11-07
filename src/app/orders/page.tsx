@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState, startTransition } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useAuth } from "@/context/auth-context";
@@ -94,11 +94,13 @@ export default function BuyerOrdersPage() {
   };
 
   useEffect(() => {
-    if (!authLoading && user?.id) {
-      fetchOrders(true);
-    } else if (!authLoading && !user) {
-      setLoading(false);
-    }
+    startTransition(() => {
+      if (!authLoading && user?.id) {
+        void fetchOrders();
+      } else if (!authLoading && !user) {
+        setLoading(false);
+      }
+    });
   }, [authLoading, user, fetchOrders]);
 
   const getStatusStep = (status: string) => {
