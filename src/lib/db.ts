@@ -4,9 +4,12 @@ import { PrismaPg } from "@prisma/adapter-pg";
 const globalForPrisma = globalThis as unknown as { prisma: PrismaClient | undefined };
 
 function createPrismaClient(): PrismaClient {
-  const connectionString =
-    process.env.DATABASE_URL ||
-    "postgresql://postgres:postgrespassword@localhost:5434/marketplace?schema=public";
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error(
+      "DATABASE_URL environment variable is missing. Please configure it in your environment or .env file."
+    );
+  }
 
   const adapter = new PrismaPg({ connectionString });
   return new PrismaClient({ adapter });

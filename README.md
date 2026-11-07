@@ -83,12 +83,12 @@ Verify that the container is healthy and running on port `5434`:
 docker compose ps
 ```
 
-### 5. Push Database Schema & Generate Prisma Client
+### 5. Run Database Migrations & Generate Prisma Client
 
-Sync the Prisma schema to the PostgreSQL database:
+Apply database migrations to the PostgreSQL database:
 
 ```bash
-npm run db:push
+npm run db:deploy # or 'npm run db:migrate' to create new migrations in development
 ```
 
 Generate the Prisma Client types:
@@ -162,7 +162,9 @@ The seed script creates ready-to-use accounts for each user role:
 | `npm run build` | Compiles the production build |
 | `npm run start` | Starts the production server |
 | `npm run lint` | Runs ESLint check across all files |
-| `npm run db:push` | Pushes the Prisma schema state directly to the database |
+| `npm run db:migrate` | Creates and applies new migrations during development (`prisma migrate dev`) |
+| `npm run db:deploy` | Applies all pending migrations in production / CI (`prisma migrate deploy`) |
+| `npm run db:push` | Pushes the Prisma schema state directly to the database without migrations |
 | `npm run db:generate` | Re-generates the Prisma Client TypeScript definitions |
 | `npm run db:seed` | Runs `prisma/seed.ts` to reset and seed mock marketplace data |
 | `npm run db:studio` | Opens Prisma Studio (interactive visual database GUI) |
@@ -254,7 +256,7 @@ To wipe and re-seed the database:
 ```bash
 docker compose down -v
 docker compose up -d
-npm run db:push
+npm run db:deploy
 npm run db:seed
 ```
 </details>
