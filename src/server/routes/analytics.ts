@@ -41,6 +41,7 @@ export const analyticsRoutes = new Hono<Env>()
 
       const orderWhere = {
         sellerId: sellerProfileId,
+        order: { paymentStatus: "PAID" as const },
         ...(startDate ? { createdAt: { gte: startDate } } : {}),
       };
 

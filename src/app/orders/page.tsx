@@ -68,54 +68,38 @@ export default function BuyerOrdersPage() {
   }, []);
 
   const handleCancelSubOrder = async (subOrderId: string) => {
-    if (!confirm("Are you sure you want to cancel this shipment? Reserved items will be restored to the seller catalog.")) {
+    if (!confirm("Are you sure you want to cancel this vendor shipment? If paid, a refund will be processed to your card.")) {
       return;
     }
 
     setCancellingId(subOrderId);
-    setCancelMessage(null);
-
     try {
       const res = await client.api.orders.cancel[":id"].$post({
         param: { id: subOrderId },
       });
-      const data = await res.json();
 
       if (res.ok) {
-        setCancelMessage("Shipment successfully cancelled. Inventory was restored to the seller.");
-        await fetchOrders();
+        const data = await res.json();
+        setCancelMessage(data.message || "Shipment successfully cancelled.");
+        await fetchOrders(false);
       } else {
-        alert("error" in data && typeof data.error === "string" ? data.error : "Failed to cancel shipment");
+        const data = await res.json();
+        alert("error" in data ? data.error : "Failed to cancel shipment");
       }
     } catch {
-      alert("Network error: Could not cancel shipment.");
+      alert("Error processing shipment cancellation");
     } finally {
       setCancellingId(null);
     }
   };
 
   useEffect(() => {
-    if (authLoading) return;
-
-    let active = true;
-    client.api.orders["my-orders"]
-      .$get()
-      .then(async (res) => {
-        if (!res.ok) return;
-        const data = await res.json();
-        if (active) {
-          setOrders(data.orders || []);
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-
-    return () => {
-      active = false;
+    if (!authLoading && user?.id) {
+      fetchOrders(true);
+    } else if (!authLoading && !user) {
+      setLoading(false);
     }
-  }, [authLoading, user?.id]);
+  }, [authLoading, user, fetchOrders]);
 
   const getStatusStep = (status: string) => {
     switch (status) {
@@ -133,20 +117,21 @@ export default function BuyerOrdersPage() {
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-8">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-gray-200">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-6 border-b border-gray-200 gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 flex items-center space-x-2">
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight flex items-center space-x-2">
             <Package className="w-6 h-6 text-indigo-600" />
-            <span>My Purchase History & Tracking</span>
+            <span>My Orders & Shipments</span>
           </h1>
           <p className="text-xs text-gray-500 mt-1">
-            Track fulfillment timelines and carrier updates for your multi-vendor orders
+            Real-time fulfillment tracking and itemized receipts partitioned by merchant store
           </p>
         </div>
 
         <button
-          onClick={() => void fetchOrders(true)}
-          className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+          onClick={() => fetchOrders(true)}
+          disabled={loading}
+          className="inline-flex items-center space-x-2 px-4 py-2 border border-gray-300 rounded-xl text-xs font-semibold text-gray-700 bg-white hover:bg-gray-50 transition-colors shadow-xs"
         >
           <RotateCw className="w-3.5 h-3.5" />
           <span>Refresh Tracking</span>
@@ -230,7 +215,7 @@ export default function BuyerOrdersPage() {
 
                 {order.subOrders.map((sub) => {
                   const step = getStatusStep(sub.status);
-                  const isCancelled = sub.status === "CANCELLED";
+                  const isCancelled = sub.status === "CANCELLED" || sub.status === "REFUNDED";
 
                   return (
                     <div
@@ -263,6 +248,8 @@ export default function BuyerOrdersPage() {
                                 ? "bg-blue-100 text-blue-800"
                                 : sub.status === "CANCELLED"
                                 ? "bg-rose-100 text-rose-800"
+                                : sub.status === "REFUNDED"
+                                ? "bg-purple-100 text-purple-800"
                                 : "bg-amber-100 text-amber-800"
                             }`}
                           >
@@ -315,75 +302,90 @@ export default function BuyerOrdersPage() {
                         ))}
                       </div>
 
-                      {/* Delivery Stepper Tracker or Cancelled Notice */}
+                      {/* Delivery Stepper Tracker or Cancelled/Refunded Notice */}
                       {isCancelled ? (
-                        <div className="bg-rose-50/80 border border-rose-200 p-4 rounded-xl flex items-center space-x-3 text-xs text-rose-800">
-                          <XCircle className="w-5 h-5 text-rose-600 flex-shrink-0" />
+                        <div
+                          className={`p-4 rounded-xl flex items-center space-x-3 text-xs ${
+                            sub.status === "REFUNDED"
+                              ? "bg-purple-50/80 border border-purple-200 text-purple-800"
+                              : "bg-rose-50/80 border border-rose-200 text-rose-800"
+                          }`}
+                        >
+                          <XCircle
+                            className={`w-5 h-5 flex-shrink-0 ${
+                              sub.status === "REFUNDED" ? "text-purple-600" : "text-rose-600"
+                            }`}
+                          />
                           <div>
-                            <span className="font-bold">Shipment Cancelled:</span> Stock for these items was returned to the merchant inventory.
+                            <span className="font-bold">
+                              {sub.status === "REFUNDED" ? "Shipment Refunded:" : "Shipment Cancelled:"}
+                            </span>{" "}
+                            {sub.status === "REFUNDED"
+                              ? "A refund has been issued to your payment method and inventory was restored."
+                              : "Stock for these items was returned to the merchant inventory."}
                           </div>
                         </div>
                       ) : (
                         <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-3">
-                        <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
-                          <span className="flex items-center space-x-1.5">
-                            <Truck className="w-4 h-4 text-indigo-600" />
-                            <span>Delivery Progress Timeline</span>
-                          </span>
-                          {sub.trackingNumber && (
-                            <span className="font-mono text-indigo-600">
-                              Carrier: {sub.carrierName || "Expedited Express"} • Track #{sub.trackingNumber}
+                          <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                            <span className="flex items-center space-x-1.5">
+                              <Truck className="w-4 h-4 text-indigo-600" />
+                              <span>Delivery Progress Timeline</span>
                             </span>
-                          )}
-                        </div>
+                            {sub.trackingNumber && (
+                              <span className="font-mono text-indigo-600">
+                                Carrier: {sub.carrierName || "Expedited Express"} • Track #{sub.trackingNumber}
+                              </span>
+                            )}
+                          </div>
 
-                        {/* Visual Progress Bar */}
-                        <div className="relative flex items-center justify-between pt-2">
-                          <div className="absolute top-1/2 left-0 right-0 h-1 bg-gray-200 -translate-y-1/2 z-0" />
-                          <div
-                            className="absolute top-1/2 left-0 h-1 bg-indigo-600 -translate-y-1/2 transition-all duration-500 z-0"
-                            style={{
-                              width:
-                                step === 1 ? "0%" : step === 2 ? "33%" : step === 3 ? "66%" : "100%",
-                            }}
-                          />
+                          {/* Visual Progress Bar */}
+                          <div className="relative flex items-center justify-between pt-2">
+                            <div className="absolute top-1/2 left-0 right-0 h-1 bg-gray-200 -translate-y-1/2 z-0" />
+                            <div
+                              className="absolute top-1/2 left-0 h-1 bg-indigo-600 -translate-y-1/2 transition-all duration-500 z-0"
+                              style={{
+                                width:
+                                  step === 1 ? "0%" : step === 2 ? "33%" : step === 3 ? "66%" : "100%",
+                              }}
+                            />
 
-                          {[
-                            { label: "Order Placed", stepNum: 1 },
-                            { label: "Processing", stepNum: 2 },
-                            { label: "Shipped", stepNum: 3 },
-                            { label: "Delivered", stepNum: 4 },
-                          ].map((s) => {
-                            const isPassed = step >= s.stepNum;
-                            return (
-                              <div
-                                key={s.stepNum}
-                                className="relative z-10 flex flex-col items-center"
-                              >
+                            {[
+                              { label: "Order Placed", stepNum: 1 },
+                              { label: "Processing", stepNum: 2 },
+                              { label: "Shipped", stepNum: 3 },
+                              { label: "Delivered", stepNum: 4 },
+                            ].map((s) => {
+                              const isPassed = step >= s.stepNum;
+                              return (
                                 <div
-                                  className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shadow-xs ${
-                                    isPassed
-                                      ? "bg-indigo-600 text-white"
-                                      : "bg-white border-2 border-gray-300 text-gray-400"
-                                  }`}
+                                  key={s.stepNum}
+                                  className="relative z-10 flex flex-col items-center"
                                 >
-                                  {isPassed ? <CheckCircle2 className="w-3.5 h-3.5" /> : s.stepNum}
+                                  <div
+                                    className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shadow-xs ${
+                                      isPassed
+                                        ? "bg-indigo-600 text-white"
+                                        : "bg-white border-2 border-gray-300 text-gray-400"
+                                    }`}
+                                  >
+                                    {isPassed ? <CheckCircle2 className="w-3.5 h-3.5" /> : s.stepNum}
+                                  </div>
+                                  <span
+                                    className={`text-[10px] font-semibold mt-1 ${
+                                      isPassed ? "text-indigo-900" : "text-gray-400"
+                                    }`}
+                                  >
+                                    {s.label}
+                                  </span>
                                 </div>
-                                <span
-                                  className={`text-[10px] font-semibold mt-1 ${
-                                    isPassed ? "text-indigo-900" : "text-gray-400"
-                                  }`}
-                                >
-                                  {s.label}
-                                </span>
-                              </div>
-                            );
-                          })}
+                              );
+                            })}
+                          </div>
                         </div>
-                      </div>
-                    )}
-                  </div>
-                );
+                      )}
+                    </div>
+                  );
                 })}
               </div>
             </div>

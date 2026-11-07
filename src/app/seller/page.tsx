@@ -44,12 +44,11 @@ type SellerCategories = SellerCategoriesResponse extends { categories: infer C }
 type SellerCategory = SellerCategories extends Array<infer C> ? C : never;
 type CreatedProductResponse = InferResponseType<typeof client.api.products.$post, 201>;
 type CreatedProduct = CreatedProductResponse extends { product: infer P } ? P : null;
-type FulfillmentStatus = "PROCESSING" | "SHIPPED" | "DELIVERED" | "CANCELLED";
+type FulfillmentStatus = "PROCESSING" | "SHIPPED" | "DELIVERED" | "CANCELLED" | "REFUNDED";
 
 function getFulfillmentStatus(status: SellerSubOrder["status"]): FulfillmentStatus {
   if (status === "PROCESSING") return "SHIPPED";
-  if (status === "REFUNDED") return "PROCESSING";
-  return status;
+    return status;
 }
 
 function getAddressValue(address: unknown, key: string): string {
@@ -886,7 +885,7 @@ function SellerDashboardContent() {
             {/* Filters */}
             <div className="p-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-4">
               <div className="flex items-center space-x-1.5">
-                {["ALL", "PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED"].map((st) => (
+                {["ALL", "PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED", "REFUNDED"].map((st) => (
                   <button
                     key={st}
                     onClick={() => setOrderStatusFilter(st)}
@@ -963,6 +962,10 @@ function SellerDashboardContent() {
                                 ? "bg-emerald-100 text-emerald-800"
                                 : o.status === "SHIPPED"
                                 ? "bg-blue-100 text-blue-800"
+                                : o.status === "CANCELLED"
+                                ? "bg-rose-100 text-rose-800"
+                                : o.status === "REFUNDED"
+                                ? "bg-purple-100 text-purple-800"
                                 : "bg-amber-100 text-amber-800"
                             }`}
                           >
@@ -975,19 +978,23 @@ function SellerDashboardContent() {
                           )}
                         </td>
                         <td className="py-4 px-6 text-right">
-                          <button
-                            onClick={() => {
-                              setSelectedSubOrder(o);
-                              setFulfillmentForm({
-                                status: getFulfillmentStatus(o.status),
-                                trackingNumber: o.trackingNumber || "",
-                                carrierName: o.carrierName || "",
-                              });
-                            }}
-                            className="px-3 py-1.5 bg-violet-50 text-violet-700 hover:bg-violet-100 rounded-lg text-xs font-bold transition-colors"
-                          >
-                            Update Status
-                          </button>
+                          {o.status === "CANCELLED" || o.status === "REFUNDED" ? (
+                            <span className="text-[11px] font-bold text-slate-400">Archived</span>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setSelectedSubOrder(o);
+                                setFulfillmentForm({
+                                  status: getFulfillmentStatus(o.status),
+                                  trackingNumber: o.trackingNumber || "",
+                                  carrierName: o.carrierName || "",
+                                });
+                              }}
+                              className="px-3 py-1.5 bg-violet-50 text-violet-700 hover:bg-violet-100 rounded-lg text-xs font-bold transition-colors"
+                            >
+                              Update Status
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -1543,6 +1550,7 @@ function SellerDashboardContent() {
                   <option value="SHIPPED">Shipped (In Transit)</option>
                   <option value="DELIVERED">Delivered to Buyer</option>
                   <option value="CANCELLED">Cancelled</option>
+                  <option value="REFUNDED">Refund & Cancel</option>
                 </select>
               </div>
 

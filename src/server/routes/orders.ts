@@ -8,6 +8,7 @@ import {
   isStripeConfigured,
   createStripeCheckoutSession,
   verifyStripeCheckoutSession,
+  stripe,
 } from "@/lib/stripe";
 import { cancelPendingOrder, markOrderPaid } from "../order-lifecycle";
 
@@ -194,7 +195,7 @@ export const orderRoutes = new Hono<Env>()
 
           const createdSubOrders = [];
 
-          // 3. Create Sub-Orders for each Seller
+          // 3. Create Sub-Orders for each Seller (PayoutRecords will be created upon payment confirmation in markOrderPaid)
           for (const [sellerId, group] of sellerGroups.entries()) {
             const subOrder = await tx.subOrder.create({
               data: {
@@ -217,20 +218,10 @@ export const orderRoutes = new Hono<Env>()
               },
             });
 
-            // 4. Create Payout Record
-            await tx.payoutRecord.create({
-              data: {
-                sellerId: sellerId,
-                subOrderId: subOrder.id,
-                amount: group.sellerPayout,
-                status: "PENDING",
-              },
-            });
-
             createdSubOrders.push(subOrder);
           }
 
-          // 5. Initialize Stripe Checkout Session
+          // 4. Initialize Stripe Checkout Session
           const stripeItems = consolidatedItems.map((i) => {
             const prod = dbProducts.find((p) => p.id === i.productId)!;
             return {
@@ -565,7 +556,7 @@ export const orderRoutes = new Hono<Env>()
     }
   )
 
-  // 3. Seller's Sub-Orders (Paginated, Strictly Isolated by Seller Profile)
+  // 5. Seller's Sub-Orders (Paginated, Strictly Isolated to Paid Orders by Seller Profile)
   .get(
     "/seller-orders",
     requireSeller,
@@ -594,7 +585,10 @@ export const orderRoutes = new Hono<Env>()
         sellerProfileId = profile.id;
       }
 
-      const where = { sellerId: sellerProfileId };
+      const where = {
+        sellerId: sellerProfileId,
+        order: { paymentStatus: "PAID" as const },
+      };
 
       const [subOrders, total] = await Promise.all([
         db.subOrder.findMany({
@@ -605,6 +599,7 @@ export const orderRoutes = new Hono<Env>()
                 id: true,
                 createdAt: true,
                 shippingAddress: true,
+                paymentStatus: true,
                 buyer: {
                   select: {
                     name: true,
@@ -642,14 +637,14 @@ export const orderRoutes = new Hono<Env>()
     }
   )
 
-  // 4. Update Sub-Order Fulfillment Status with State Machine (Seller Only)
+  // 6. Update Sub-Order Fulfillment Status with State Machine & Refunds (Seller Only)
   .patch(
     "/seller-orders/:id/status",
     requireSeller,
     zValidator(
       "json",
       z.object({
-        status: z.enum(["PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED"]),
+        status: z.enum(["PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED", "REFUNDED"]),
         trackingNumber: z.string().optional(),
         carrierName: z.string().optional(),
       })
@@ -666,10 +661,10 @@ export const orderRoutes = new Hono<Env>()
         sellerProfileId = profile.id;
       }
 
-      // Check ownership
+      // Check ownership & order status
       const subOrder = await db.subOrder.findUnique({
         where: { id: subOrderId },
-        include: { items: true },
+        include: { items: true, order: true },
       });
 
       if (!subOrder) {
@@ -680,10 +675,14 @@ export const orderRoutes = new Hono<Env>()
         return c.json({ error: "Forbidden: You cannot modify orders for another seller" }, 403);
       }
 
+      if (subOrder.order.paymentStatus !== "PAID") {
+        return c.json({ error: "Cannot fulfill or update status for an unpaid order" }, 400);
+      }
+
       // Order Status State Machine Validation
       const VALID_TRANSITIONS: Record<string, string[]> = {
-        PROCESSING: ["SHIPPED", "CANCELLED"],
-        SHIPPED: ["DELIVERED", "CANCELLED"],
+        PROCESSING: ["SHIPPED", "CANCELLED", "REFUNDED"],
+        SHIPPED: ["DELIVERED", "CANCELLED", "REFUNDED"],
         DELIVERED: [], // Terminal state
         CANCELLED: [], // Terminal state
         REFUNDED: [],  // Terminal state
@@ -701,10 +700,41 @@ export const orderRoutes = new Hono<Env>()
         }
       }
 
-      const isCancelling = status === "CANCELLED" && subOrder.status !== "CANCELLED";
+      const isCancelling =
+        (status === "CANCELLED" || status === "REFUNDED") &&
+        subOrder.status !== "CANCELLED" &&
+        subOrder.status !== "REFUNDED";
+
+      // If cancelling/refunding a paid sub-order, issue refund to buyer via Stripe
+      if (isCancelling) {
+        if (
+          isStripeConfigured() &&
+          stripe &&
+          subOrder.order.stripePaymentIntentId
+        ) {
+          try {
+            await stripe.refunds.create({
+              payment_intent: subOrder.order.stripePaymentIntentId,
+              amount: Math.round(Number(subOrder.subtotal) * 100),
+            });
+          } catch (refundErr: unknown) {
+            console.error("[Stripe Refund Error]:", refundErr);
+            return c.json(
+              {
+                error: `Stripe refund execution failed: ${
+                  refundErr instanceof Error ? refundErr.message : "Unknown error"
+                }`,
+              },
+              400
+            );
+          }
+        }
+      }
+
+      const targetStatus = isCancelling ? "REFUNDED" : status;
 
       const updated = await db.$transaction(async (tx) => {
-        // If transitioning to CANCELLED, restore product inventories and void payout record
+        // If transitioning to CANCELLED/REFUNDED, restore product inventories and void payout record
         if (isCancelling) {
           for (const item of subOrder.items) {
             await tx.product.update({
@@ -715,33 +745,17 @@ export const orderRoutes = new Hono<Env>()
             });
           }
 
-          // Mark payout as FAILED so vendor won't receive payout for a cancelled order
+          // Mark payout as FAILED so vendor won't receive payout for a refunded order
           await tx.payoutRecord.updateMany({
             where: { subOrderId: subOrder.id },
             data: { status: "FAILED" },
           });
-
-          // Check if all sibling sub-orders are also CANCELLED or REFUNDED
-          const activeSiblingCount = await tx.subOrder.count({
-            where: {
-              orderId: subOrder.orderId,
-              id: { not: subOrderId },
-              status: { notIn: ["CANCELLED", "REFUNDED"] },
-            },
-          });
-
-          if (activeSiblingCount === 0) {
-            await tx.order.update({
-              where: { id: subOrder.orderId },
-              data: { paymentStatus: "CANCELLED" },
-            });
-          }
         }
 
         return await tx.subOrder.update({
           where: { id: subOrderId },
           data: {
-            status,
+            status: targetStatus,
             ...(trackingNumber ? { trackingNumber } : {}),
             ...(carrierName ? { carrierName } : {}),
           },
@@ -752,7 +766,7 @@ export const orderRoutes = new Hono<Env>()
     }
   )
 
-  // 5. Buyer Cancel Sub-Order (Buyer Only, allowed only when status is PROCESSING)
+  // 7. Buyer Cancel Sub-Order (Buyer Only, allowed only when status is PROCESSING, refunds paid orders)
   .post("/cancel/:id", requireAuth, async (c) => {
     const user = c.get("user")!;
     const subOrderId = c.req.param("id");
@@ -780,6 +794,35 @@ export const orderRoutes = new Hono<Env>()
       );
     }
 
+    const isPaid = subOrder.order.paymentStatus === "PAID";
+
+    if (isPaid) {
+      if (
+        isStripeConfigured() &&
+        stripe &&
+        subOrder.order.stripePaymentIntentId
+      ) {
+        try {
+          await stripe.refunds.create({
+            payment_intent: subOrder.order.stripePaymentIntentId,
+            amount: Math.round(Number(subOrder.subtotal) * 100),
+          });
+        } catch (refundErr: unknown) {
+          console.error("[Stripe Refund Error]:", refundErr);
+          return c.json(
+            {
+              error: `Stripe refund execution failed: ${
+                refundErr instanceof Error ? refundErr.message : "Unknown error"
+              }`,
+            },
+            400
+          );
+        }
+      }
+    }
+
+    const targetStatus = isPaid ? "REFUNDED" : "CANCELLED";
+
     await db.$transaction(async (tx) => {
       // 1. Restore product inventory
       for (const item of subOrder.items) {
@@ -789,10 +832,10 @@ export const orderRoutes = new Hono<Env>()
         });
       }
 
-      // 2. Mark Sub-Order as CANCELLED
+      // 2. Mark Sub-Order as REFUNDED (if paid) or CANCELLED (if unpaid)
       await tx.subOrder.update({
         where: { id: subOrderId },
-        data: { status: "CANCELLED" },
+        data: { status: targetStatus },
       });
 
       // 3. Mark Payout Record as FAILED
@@ -801,26 +844,33 @@ export const orderRoutes = new Hono<Env>()
         data: { status: "FAILED" },
       });
 
-      // 4. Check if all sibling sub-orders are also CANCELLED
-      const remainingActive = await tx.subOrder.count({
-        where: {
-          orderId: subOrder.orderId,
-          status: { not: "CANCELLED" },
-        },
-      });
-
-      if (remainingActive === 0) {
-        await tx.order.update({
-          where: { id: subOrder.orderId },
-          data: { paymentStatus: "CANCELLED" },
+      // 4. If unpaid, and all sibling sub-orders are also CANCELLED, set order to CANCELLED
+      if (!isPaid) {
+        const remainingActive = await tx.subOrder.count({
+          where: {
+            orderId: subOrder.orderId,
+            status: { notIn: ["CANCELLED", "REFUNDED"] },
+          },
         });
+
+        if (remainingActive === 0) {
+          await tx.order.update({
+            where: { id: subOrder.orderId },
+            data: { paymentStatus: "CANCELLED" },
+          });
+        }
       }
     });
 
-    return c.json({ success: true, message: "Order cancelled and inventory restored." });
+    return c.json({
+      success: true,
+      message: isPaid
+        ? "Order cancelled and refunded successfully. Inventory restored."
+        : "Order cancelled and inventory restored.",
+    });
   })
 
-  // 6. Track Sub-Order by ID (Secured against IDOR and sensitive data leaks)
+  // 8. Track Sub-Order by ID (Secured against IDOR and sensitive data leaks)
   .get("/track/:id", requireAuth, async (c) => {
     const user = c.get("user")!;
     const id = c.req.param("id");

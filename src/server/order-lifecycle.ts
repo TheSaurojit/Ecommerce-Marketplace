@@ -5,19 +5,45 @@ export async function markOrderPaid(
   stripeSessionId: string,
   paymentIntentId: string | null
 ): Promise<boolean> {
-  const result = await db.order.updateMany({
-    where: {
-      id: orderId,
-      stripeSessionId,
-      paymentStatus: "PAYMENT_PENDING",
-    },
-    data: {
-      paymentStatus: "PAID",
-      ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
-    },
-  });
+  return db.$transaction(async (tx) => {
+    const result = await tx.order.updateMany({
+      where: {
+        id: orderId,
+        stripeSessionId,
+        paymentStatus: "PAYMENT_PENDING",
+      },
+      data: {
+        paymentStatus: "PAID",
+        ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
+      },
+    });
 
-  return result.count === 1;
+    if (result.count !== 1) {
+      return false;
+    }
+
+    const subOrders = await tx.subOrder.findMany({
+      where: { orderId },
+      select: {
+        id: true,
+        sellerId: true,
+        sellerPayout: true,
+      },
+    });
+
+    for (const subOrder of subOrders) {
+      await tx.payoutRecord.create({
+        data: {
+          sellerId: subOrder.sellerId,
+          subOrderId: subOrder.id,
+          amount: subOrder.sellerPayout,
+          status: "PENDING",
+        },
+      });
+    }
+
+    return true;
+  });
 }
 
 export async function cancelPendingOrder(

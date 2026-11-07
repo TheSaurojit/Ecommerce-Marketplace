@@ -14,9 +14,12 @@ export const adminRoutes = new Hono<Env>()
     const [totalSellers, totalProducts, totalOrders, subOrders] = await Promise.all([
       db.sellerProfile.count(),
       db.product.count(),
-      db.order.count(),
+      db.order.count({
+        where: { paymentStatus: "PAID" },
+      }),
       db.subOrder.findMany({
         where: {
+          order: { paymentStatus: "PAID" },
           status: { notIn: ["CANCELLED", "REFUNDED"] },
         },
         select: {
@@ -297,7 +300,7 @@ export const adminRoutes = new Hono<Env>()
     }
   )
 
-  // 7. Disburse / Update Payout Record Status
+  // 7. Disburse / Update Payout Record Status with Strict State Machine & Idempotency
   .patch(
     "/payouts/:id/status",
     zValidator(
@@ -320,6 +323,36 @@ export const adminRoutes = new Hono<Env>()
         return c.json({ error: "Payout record not found" }, 404);
       }
 
+      // Enforce strict state machine: only PENDING payouts can transition to TRANSFERRED or FAILED
+      if (status === "TRANSFERRED") {
+        if (existing.status !== "PENDING") {
+          return c.json(
+            {
+              error: `Cannot disburse payout: current status is "${existing.status}". Only PENDING payouts can be transitioned to TRANSFERRED.`,
+            },
+            400
+          );
+        }
+      } else if (status === "FAILED") {
+        if (existing.status !== "PENDING") {
+          return c.json(
+            {
+              error: `Cannot mark payout as failed: current status is "${existing.status}". Only PENDING payouts can be transitioned to FAILED.`,
+            },
+            400
+          );
+        }
+      } else if (status === "PENDING") {
+        if (existing.status !== "PENDING") {
+          return c.json(
+            {
+              error: `Cannot reset payout to PENDING: current status is "${existing.status}".`,
+            },
+            400
+          );
+        }
+      }
+
       let transferId = stripeTransferId;
 
       // When transitioning to TRANSFERRED: execute real Stripe transfer if Connect account exists
@@ -331,13 +364,18 @@ export const adminRoutes = new Hono<Env>()
           existing.seller.payoutsEnabled
         ) {
           try {
-            const transfer = await stripe.transfers.create({
-              amount: Math.round(Number(existing.amount) * 100),
-              currency: "inr",
-              destination: existing.seller.stripeAccountId,
-              description: `Payout for SubOrder ${existing.subOrderId}`,
-              transfer_group: existing.subOrderId,
-            });
+            const transfer = await stripe.transfers.create(
+              {
+                amount: Math.round(Number(existing.amount) * 100),
+                currency: "inr",
+                destination: existing.seller.stripeAccountId,
+                description: `Payout for SubOrder ${existing.subOrderId}`,
+                transfer_group: existing.subOrderId,
+              },
+              {
+                idempotencyKey: existing.id,
+              }
+            );
             transferId = transfer.id;
           } catch (stripeErr: unknown) {
             console.error("[Stripe Connect Transfer Error]:", stripeErr);
@@ -356,12 +394,30 @@ export const adminRoutes = new Hono<Env>()
         }
       }
 
-      const updated = await db.payoutRecord.update({
-        where: { id },
+      // Atomic conditional update: only update if status is still PENDING
+      const updateResult = await db.payoutRecord.updateMany({
+        where: {
+          id: existing.id,
+          status: "PENDING",
+        },
         data: {
           status,
           ...(transferId ? { stripeTransferId: transferId } : {}),
         },
+      });
+
+      if (updateResult.count === 0) {
+        return c.json(
+          {
+            error: "Conflict: Payout has already been processed or status changed concurrently.",
+          },
+          409
+        );
+      }
+
+      const updated = await db.payoutRecord.findUnique({
+        where: { id },
+        include: { seller: true },
       });
 
       return c.json({ success: true, payout: updated });
