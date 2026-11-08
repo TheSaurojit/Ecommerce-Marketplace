@@ -165,7 +165,7 @@ The seed script creates ready-to-use accounts for each user role:
 | `npm test` | Runs the Vitest integration test suite (checkout, pay, cancel lifecycle) |
 | `npm run db:migrate` | Creates and applies new migrations during development (`prisma migrate dev`) |
 | `npm run db:deploy` | Applies all pending migrations in production / CI (`prisma migrate deploy`) |
-| `npm run db:push` | Pushes the Prisma schema state directly to the database without migrations |
+| `npm run db:reset` | Drops, recreates, runs migrations, and seeds the dev database (`prisma migrate reset`) |
 | `npm run db:generate` | Re-generates the Prisma Client TypeScript definitions |
 | `npm run db:seed` | Runs `prisma/seed.ts` to reset and seed mock marketplace data |
 | `npm run db:studio` | Opens Prisma Studio (interactive visual database GUI) |
@@ -244,7 +244,7 @@ To test Stripe Checkout events and automatic order status updates locally:
 
 If you update `prisma/schema.prisma` or see type errors related to `@/generated/prisma`:
 ```bash
-npm run db:push
+npm run db:migrate
 npm run db:generate
 ```
 Restart your development server or TypeScript language server.
