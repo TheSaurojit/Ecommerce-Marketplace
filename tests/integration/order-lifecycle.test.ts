@@ -186,6 +186,7 @@ describe("Order Lifecycle Integration Test (Checkout, Payment, Cancellation, Pay
   let createdParentOrderId: string;
   let createdSubOrderId: string;
   let stripeSessionId: string;
+  let subOrder2Id: string;
 
   // --------------------------------------------------------------------------
   // Phase 1: Checkout & Unpaid Order Isolation (Issue 1)
@@ -353,12 +354,17 @@ describe("Order Lifecycle Integration Test (Checkout, Payment, Cancellation, Pay
     const cancelBody = await cancelRes.json();
     expect(cancelBody.subOrder.status).toBe("REFUNDED");
 
-    // 1. Verify Stripe refund was called with payment_intent and suborder amount in cents (₹200 = 20000)
+    // 1. Verify Stripe refund was called with payment_intent, suborder amount in cents, and idempotencyKey
     expect(mockRefundCreate).toHaveBeenCalledTimes(1);
-    expect(mockRefundCreate).toHaveBeenCalledWith({
-      payment_intent: "pi_mock_lifecycle_123",
-      amount: 20000,
-    });
+    expect(mockRefundCreate).toHaveBeenCalledWith(
+      {
+        payment_intent: "pi_mock_lifecycle_123",
+        amount: 20000,
+      },
+      {
+        idempotencyKey: `refund_${createdSubOrderId}`,
+      }
+    );
 
     // 2. Verify product inventory was restocked (8 + 2 = 10)
     const restockedProd = await db.product.findUnique({ where: { id: product.id } });
@@ -425,7 +431,7 @@ describe("Order Lifecycle Integration Test (Checkout, Payment, Cancellation, Pay
       where: { id: checkout2Body.orderId },
       include: { subOrders: true },
     });
-    const subOrder2Id = order2!.subOrders[0].id;
+    subOrder2Id = order2!.subOrders[0].id;
     const validPayout = await db.payoutRecord.findUnique({
       where: { subOrderId: subOrder2Id },
     });
@@ -456,5 +462,232 @@ describe("Order Lifecycle Integration Test (Checkout, Payment, Cancellation, Pay
     expect(doubleDisburseRes.status).toBe(400);
     const doubleDisburseBody = await doubleDisburseRes.json();
     expect(doubleDisburseBody.error).toMatch(/Cannot disburse payout: current status is "TRANSFERRED"/i);
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 5: Transferred Payout Cancellation Guard (Issue 2)
+  // --------------------------------------------------------------------------
+  it("Phase 5: Cannot cancel or refund an order if seller payout is already TRANSFERRED", async () => {
+    mockRefundCreate.mockClear();
+
+    // subOrder2Id from Phase 4 already has its PayoutRecord in TRANSFERRED status
+    const transferredPayout = await db.payoutRecord.findUnique({
+      where: { subOrderId: subOrder2Id },
+    });
+    expect(transferredPayout?.status).toBe("TRANSFERRED");
+
+    // 1. Seller attempt to cancel must return 400
+    const sellerCancelRes = await app.request(`/api/orders/seller-orders/${subOrder2Id}/status`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${sellerToken}`,
+      },
+      body: JSON.stringify({ status: "CANCELLED" }),
+    });
+    expect(sellerCancelRes.status).toBe(400);
+    const sellerCancelBody = await sellerCancelRes.json();
+    expect(sellerCancelBody.error).toMatch(/seller payout has already been transferred/i);
+
+    // 2. Buyer attempt to cancel must also return 400
+    const buyerCancelRes = await app.request(`/api/orders/cancel/${subOrder2Id}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${buyerToken}` },
+    });
+    expect(buyerCancelRes.status).toBe(400);
+    const buyerCancelBody = await buyerCancelRes.json();
+    expect(buyerCancelBody.error).toMatch(/seller payout has already been transferred/i);
+
+    // 3. Verify Stripe refund was NOT called
+    expect(mockRefundCreate).not.toHaveBeenCalled();
+
+    // 4. Verify PayoutRecord remains TRANSFERRED (not corrupted to FAILED)
+    const payoutAfter = await db.payoutRecord.findUnique({
+      where: { subOrderId: subOrder2Id },
+    });
+    expect(payoutAfter?.status).toBe("TRANSFERRED");
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 6: Concurrent Cancel Race Condition & Idempotency Guard (Issue 1)
+  // --------------------------------------------------------------------------
+  it("Phase 6: Concurrent buyer cancel and seller cancel on one paid sub-order triggers only one refund and restocks once", async () => {
+    mockRefundCreate.mockClear();
+
+    // 1. Create a fresh paid order with quantity 2
+    const checkoutRes = await app.request("/api/orders/checkout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${buyerToken}`,
+      },
+      body: JSON.stringify({
+        items: [{ productId: product.id, quantity: 2 }],
+        shippingAddress: {
+          fullName: "Concurrent Test Buyer",
+          addressLine: "100 Parallel Lane",
+          city: "Test City",
+          state: "Test State",
+          postalCode: "123456",
+          country: "India",
+        },
+      }),
+    });
+    expect(checkoutRes.status).toBe(201);
+    const checkoutBody = await checkoutRes.json();
+
+    const initialStock = (await db.product.findUnique({ where: { id: product.id } }))!.inventoryCount;
+
+    await markOrderPaid(checkoutBody.orderId, checkoutBody.stripeSessionId, "pi_mock_concurrent_123");
+
+    const order = await db.order.findUnique({
+      where: { id: checkoutBody.orderId },
+      include: { subOrders: true },
+    });
+    const subOrderId = order!.subOrders[0].id;
+
+    // 2. Fire buyer cancel and seller cancel concurrently
+    const [buyerRes, sellerRes] = await Promise.all([
+      app.request(`/api/orders/cancel/${subOrderId}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${buyerToken}` },
+      }),
+      app.request(`/api/orders/seller-orders/${subOrderId}/status`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sellerToken}`,
+        },
+        body: JSON.stringify({ status: "CANCELLED" }),
+      }),
+    ]);
+
+    // One must succeed with 200, the other must fail with 409 Conflict
+    const statuses = [buyerRes.status, sellerRes.status].sort();
+    expect(statuses).toEqual([200, 409]);
+
+    // 3. Verify Stripe refund was called exactly once with idempotencyKey
+    expect(mockRefundCreate).toHaveBeenCalledTimes(1);
+    expect(mockRefundCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payment_intent: "pi_mock_concurrent_123",
+      }),
+      {
+        idempotencyKey: `refund_${subOrderId}`,
+      }
+    );
+
+    // 4. Verify stock was restored by exactly 2 (not 4)
+    const finalStock = (await db.product.findUnique({ where: { id: product.id } }))!.inventoryCount;
+    expect(finalStock - initialStock).toBe(2);
+
+    // 5. Verify sub-order is REFUNDED
+    const finalSubOrder = await db.subOrder.findUnique({ where: { id: subOrderId } });
+    expect(finalSubOrder?.status).toBe("REFUNDED");
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 7: Partial Unpaid Order Cancellation Guard (Issue 3)
+  // --------------------------------------------------------------------------
+  it("Phase 7: Reject cancelling a sub-order on an unpaid order, and markOrderPaid ignores cancelled sub-orders", async () => {
+    // 1. Create an unpaid order with 1 item
+    const checkoutRes = await app.request("/api/orders/checkout", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${buyerToken}`,
+      },
+      body: JSON.stringify({
+        items: [{ productId: product.id, quantity: 1 }],
+        shippingAddress: {
+          fullName: "Unpaid Cancel Buyer",
+          addressLine: "200 Unpaid St",
+          city: "Test City",
+          state: "Test State",
+          postalCode: "123456",
+          country: "India",
+        },
+      }),
+    });
+    expect(checkoutRes.status).toBe(201);
+    const checkoutBody = await checkoutRes.json();
+
+    const order = await db.order.findUnique({
+      where: { id: checkoutBody.orderId },
+      include: { subOrders: true },
+    });
+    const subOrderId = order!.subOrders[0].id;
+
+    // 2. Attempt to cancel individual sub-order while paymentStatus is PAYMENT_PENDING must return 400
+    const cancelRes = await app.request(`/api/orders/cancel/${subOrderId}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${buyerToken}` },
+    });
+    expect(cancelRes.status).toBe(400);
+    const cancelBody = await cancelRes.json();
+    expect(cancelBody.error).toMatch(/Cannot cancel individual items on an unpaid order/i);
+
+    // 3. Verify sub-order remains in PROCESSING state
+    const subOrderAfter = await db.subOrder.findUnique({ where: { id: subOrderId } });
+    expect(subOrderAfter?.status).toBe("PROCESSING");
+
+    // Clean up this pending order
+    await db.payoutRecord.deleteMany({ where: { subOrderId } });
+    await db.orderItem.deleteMany({ where: { subOrderId } });
+    await db.subOrder.deleteMany({ where: { id: subOrderId } });
+    await db.order.delete({ where: { id: checkoutBody.orderId } });
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 8: Moderation Bypass Guard via OUT_OF_STOCK (Issue 4)
+  // --------------------------------------------------------------------------
+  it("Phase 8: Seller cannot set OUT_OF_STOCK on an unapproved product, and public route returns 404", async () => {
+    // 1. Seller creates a new product (defaults to PENDING_REVIEW)
+    const createRes = await app.request("/api/products", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${sellerToken}`,
+      },
+      body: JSON.stringify({
+        title: `Pending Product ${Date.now()}`,
+        description: "This product is waiting for moderation approval",
+        price: 50.0,
+        inventoryCount: 5,
+        categoryId: category.id,
+        images: ["https://example.com/pending.jpg"],
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const createBody = await createRes.json();
+    const pendingProduct = createBody.product;
+    expect(pendingProduct.status).toBe("PENDING_REVIEW");
+
+    // 2. Seller attempts to bypass moderation by patching status to OUT_OF_STOCK -> must return 400
+    const patchRes = await app.request(`/api/products/${pendingProduct.id}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${sellerToken}`,
+      },
+      body: JSON.stringify({ status: "OUT_OF_STOCK" }),
+    });
+    expect(patchRes.status).toBe(400);
+    const patchBody = await patchRes.json();
+    expect(patchBody.error).toMatch(/Product must first be approved and published/i);
+
+    // 3. Verify product status in DB remains PENDING_REVIEW
+    const prodInDb = await db.product.findUnique({ where: { id: pendingProduct.id } });
+    expect(prodInDb?.status).toBe("PENDING_REVIEW");
+
+    // 4. Verify public page returns 404 (moderation bypass prevented)
+    const publicRes = await app.request(`/api/products/slug/${pendingProduct.slug}`, {
+      method: "GET",
+    });
+    expect(publicRes.status).toBe(404);
+
+    // Cleanup the pending product
+    await db.productImage.deleteMany({ where: { productId: pendingProduct.id } });
+    await db.product.delete({ where: { id: pendingProduct.id } });
   });
 });

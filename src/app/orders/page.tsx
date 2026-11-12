@@ -13,8 +13,11 @@ import {
   ShoppingBag,
   RotateCw,
   XCircle,
+  Radio,
+  Sparkles,
 } from "lucide-react";
 import { client } from "@/lib/rpc";
+import { useRealtimeSubscription } from "@/hooks/use-realtime";
 
 interface BuyerOrderItem {
   id: string;
@@ -51,6 +54,54 @@ export default function BuyerOrdersPage() {
   const [loading, setLoading] = useState(true);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
+  const [realtimeNotification, setRealtimeNotification] = useState<string | null>(null);
+
+  useRealtimeSubscription({
+    topics: [user?.id ? `buyer:orders:${user.id}` : null],
+    enabled: Boolean(user?.id),
+    onEvent: (event, data) => {
+      const payload = (data.payload || data) as Record<string, unknown>;
+
+      if (event === "order:status_updated") {
+        const subOrderId = payload.subOrderId as string;
+        const status = payload.status as string;
+        const trackingNumber = payload.trackingNumber as string | undefined;
+        const carrierName = payload.carrierName as string | undefined;
+
+        setOrders((prev) =>
+          prev.map((order) => ({
+            ...order,
+            subOrders: order.subOrders.map((so) =>
+              so.id === subOrderId
+                ? {
+                    ...so,
+                    status,
+                    trackingNumber: trackingNumber ?? so.trackingNumber,
+                    carrierName: carrierName ?? so.carrierName,
+                  }
+                : so
+            ),
+          }))
+        );
+
+        setRealtimeNotification(
+          `Shipment #${subOrderId?.slice(0, 8)} status updated to "${status}"${
+            trackingNumber ? ` via ${carrierName || "Carrier"} (Tracking: ${trackingNumber})` : ""
+          }`
+        );
+        setTimeout(() => setRealtimeNotification(null), 8000);
+      } else if (event === "order:paid") {
+        const orderId = payload.orderId as string;
+        setOrders((prev) =>
+          prev.map((order) =>
+            order.id === orderId ? { ...order, paymentStatus: "PAID" } : order
+          )
+        );
+        setRealtimeNotification("Order payment confirmed via Stripe!");
+        setTimeout(() => setRealtimeNotification(null), 6000);
+      }
+    },
+  });
 
   const fetchOrders = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -130,15 +181,43 @@ export default function BuyerOrdersPage() {
           </p>
         </div>
 
-        <button
-          onClick={() => fetchOrders(true)}
-          disabled={loading}
-          className="inline-flex items-center space-x-2 px-4 py-2 border border-gray-300 rounded-xl text-xs font-semibold text-gray-700 bg-white hover:bg-gray-50 transition-colors shadow-xs"
-        >
-          <RotateCw className="w-3.5 h-3.5" />
-          <span>Refresh Tracking</span>
-        </button>
+        <div className="flex items-center space-x-3">
+          <div className="hidden sm:inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold shadow-2xs">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+            <span>Live Tracking Active</span>
+          </div>
+
+          <button
+            onClick={() => fetchOrders(true)}
+            disabled={loading}
+            className="inline-flex items-center space-x-2 px-4 py-2 border border-gray-300 rounded-xl text-xs font-semibold text-gray-700 bg-white hover:bg-gray-50 transition-colors shadow-xs"
+          >
+            <RotateCw className="w-3.5 h-3.5" />
+            <span>Refresh Tracking</span>
+          </button>
+        </div>
       </div>
+
+      {realtimeNotification && (
+        <div className="p-4 bg-gradient-to-r from-indigo-50 to-violet-50 border border-indigo-200 text-indigo-900 text-xs font-semibold rounded-2xl flex items-center justify-between shadow-xs animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex items-center space-x-2.5">
+            <div className="w-7 h-7 rounded-lg bg-indigo-600 text-white flex items-center justify-center flex-shrink-0 shadow-xs">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="font-bold text-indigo-950 block">Real-Time Dispatch Notification</span>
+              <span className="text-indigo-700 text-[11px]">{realtimeNotification}</span>
+            </div>
+          </div>
+          <button
+            onClick={() => setRealtimeNotification(null)}
+            className="text-indigo-400 hover:text-indigo-600 text-xs font-bold px-2 py-1"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {cancelMessage && (
         <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold rounded-2xl flex items-center justify-between">

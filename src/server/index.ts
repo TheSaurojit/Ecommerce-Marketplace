@@ -10,6 +10,7 @@ import { reviewRoutes } from "./routes/reviews";
 import { adminRoutes } from "./routes/admin";
 import { analyticsRoutes } from "./routes/analytics";
 import { uploadRoutes } from "./routes/upload";
+import { realtimeRoutes } from "./routes/realtime";
 import { ZodError } from "zod";
 
 const app = new Hono().basePath("/api");
@@ -57,7 +58,8 @@ export const routes = app
   .route("/reviews", reviewRoutes)
   .route("/admin", adminRoutes)
   .route("/analytics", analyticsRoutes)
-  .route("/upload", uploadRoutes);
+  .route("/upload", uploadRoutes)
+  .route("/realtime", realtimeRoutes);
 
 // Global Error Handler (Sanitizes stack traces and database internals)
 app.onError((err, c) => {

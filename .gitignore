@@ -48,5 +48,7 @@ src/generated
 .claude/
 .windsurf/
 skills-lock.json
+.codex/
+.github/
 src/generated
 

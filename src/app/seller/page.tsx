@@ -19,7 +19,10 @@ import {
   Eye,
   RefreshCw,
   ExternalLink,
+  Radio,
+  Sparkles,
 } from "lucide-react";
+import { useRealtimeSubscription } from "@/hooks/use-realtime";
 import {
   AreaChart,
   Area,
@@ -182,6 +185,7 @@ function SellerDashboardContent() {
 
   // Quick Stock Adjustment Indicator
   const [quickUpdateId, setQuickUpdateId] = useState<string | null>(null);
+  const [realtimeAlert, setRealtimeAlert] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -233,6 +237,29 @@ function SellerDashboardContent() {
       void fetchData();
     });
   }, [fetchData, user?.id]);
+
+  // Real-time seller order dispatch updates
+  useRealtimeSubscription({
+    topics: [user?.sellerProfile?.id ? `seller:orders:${user.sellerProfile.id}` : null],
+    enabled: Boolean(user?.sellerProfile?.id),
+    onEvent: (event, data) => {
+      const payload = (data.payload || data) as Record<string, unknown>;
+      if (event === "order:new") {
+        const subOrderId = (payload.subOrderId as string) || "";
+        const amount = Number(payload.amount || 0);
+        setRealtimeAlert(
+          `New Order Received! SubOrder #${subOrderId.slice(0, 8)} (Payout: ₹${amount.toFixed(2)})`
+        );
+        void fetchData();
+        setTimeout(() => setRealtimeAlert(null), 8000);
+      } else if (event === "order:cancelled") {
+        const subOrderId = (payload.subOrderId as string) || "";
+        setRealtimeAlert(`Order Cancellation: SubOrder #${subOrderId.slice(0, 8)} was cancelled & refunded.`);
+        void fetchData();
+        setTimeout(() => setRealtimeAlert(null), 8000);
+      }
+    },
+  });
 
   // Create Product
   const handleCreateProduct = async (e: React.FormEvent) => {
@@ -446,6 +473,27 @@ function SellerDashboardContent() {
 
   return (
     <div className="space-y-8">
+      {/* Real-time Order Alert */}
+      {realtimeAlert && (
+        <div className="p-4 bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 text-emerald-900 text-xs font-semibold rounded-2xl flex items-center justify-between shadow-xs animate-in fade-in slide-in-from-top-2 duration-300">
+          <div className="flex items-center space-x-2.5">
+            <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center flex-shrink-0 shadow-xs">
+              <Sparkles className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="font-bold text-emerald-950 block">Live Seller Dispatch Event</span>
+              <span className="text-emerald-700 text-[11px]">{realtimeAlert}</span>
+            </div>
+          </div>
+          <button
+            onClick={() => setRealtimeAlert(null)}
+            className="text-emerald-500 hover:text-emerald-700 text-xs font-bold px-2 py-1"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Pending Banner */}
       {isPending && (
         <div className="p-5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 flex items-start space-x-3 shadow-xs">
@@ -470,6 +518,12 @@ function SellerDashboardContent() {
             </div>
 
             <div className="flex items-center space-x-3">
+              <div className="hidden sm:inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold shadow-2xs">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
+                <span>Live Feed Active</span>
+              </div>
+
               <button
                 onClick={fetchData}
                 className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center space-x-1.5 transition-all shadow-xs"
@@ -477,7 +531,6 @@ function SellerDashboardContent() {
                 <RefreshCw className="w-3.5 h-3.5 text-slate-500" />
                 <span>Sync Metrics</span>
               </button>
-
             </div>
           </div>
 

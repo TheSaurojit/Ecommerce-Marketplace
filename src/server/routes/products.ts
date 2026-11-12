@@ -527,13 +527,24 @@ export const productRoutes = new Hono<Env>()
       // Featured is strictly admin-only
       const featuredUpdate = isAdmin && data.featured !== undefined ? { featured: data.featured } : {};
 
-      // Sellers cannot transition an unapproved product to PUBLISHED
+      // Sellers cannot transition an unapproved product to PUBLISHED or OUT_OF_STOCK (moderation bypass prevention)
       let statusUpdate = {};
       if (data.status) {
         if (!isAdmin && data.status === "PUBLISHED" && existing.status !== "PUBLISHED") {
           statusUpdate = { status: "PENDING_REVIEW" };
         } else if (!isAdmin && data.status === "PUBLISHED") {
           statusUpdate = { status: existing.status };
+        } else if (!isAdmin && data.status === "OUT_OF_STOCK") {
+          if (existing.status !== "PUBLISHED" && existing.status !== "OUT_OF_STOCK") {
+            return c.json(
+              {
+                error:
+                  "Cannot set status to OUT_OF_STOCK: Product must first be approved and published by an administrator.",
+              },
+              400
+            );
+          }
+          statusUpdate = { status: "OUT_OF_STOCK" };
         } else {
           statusUpdate = { status: data.status };
         }

@@ -1,11 +1,15 @@
 import { db } from "@/lib/db";
+import { broadcastRealtimeEvent } from "@/lib/realtime";
 
 export async function markOrderPaid(
   orderId: string,
   stripeSessionId: string,
   paymentIntentId: string | null
 ): Promise<boolean> {
-  return db.$transaction(async (tx) => {
+  let buyerId: string | null = null;
+  let notifiedSubOrders: Array<{ id: string; sellerId: string; sellerPayout: unknown }> = [];
+
+  const success = await db.$transaction(async (tx) => {
     const result = await tx.order.updateMany({
       where: {
         id: orderId,
@@ -22,14 +26,27 @@ export async function markOrderPaid(
       return false;
     }
 
+    const orderRecord = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { buyerId: true },
+    });
+    if (orderRecord) {
+      buyerId = orderRecord.buyerId;
+    }
+
     const subOrders = await tx.subOrder.findMany({
-      where: { orderId },
+      where: {
+        orderId,
+        status: { notIn: ["CANCELLED", "REFUNDED"] },
+      },
       select: {
         id: true,
         sellerId: true,
         sellerPayout: true,
       },
     });
+
+    notifiedSubOrders = subOrders;
 
     for (const subOrder of subOrders) {
       await tx.payoutRecord.create({
@@ -44,13 +61,33 @@ export async function markOrderPaid(
 
     return true;
   });
+
+  if (success) {
+    if (buyerId) {
+      broadcastRealtimeEvent(`buyer:orders:${buyerId}`, "order:paid", {
+        orderId,
+        paymentStatus: "PAID",
+      });
+    }
+    for (const subOrder of notifiedSubOrders) {
+      broadcastRealtimeEvent(`seller:orders:${subOrder.sellerId}`, "order:new", {
+        subOrderId: subOrder.id,
+        orderId,
+        amount: Number(subOrder.sellerPayout),
+      });
+    }
+  }
+
+  return success;
 }
 
 export async function cancelPendingOrder(
   orderId: string,
   stripeSessionId?: string | null
 ): Promise<boolean> {
-  return db.$transaction(async (tx) => {
+  const restoredItems: Array<{ productId: string; quantity: number }> = [];
+
+  const success = await db.$transaction(async (tx) => {
     const where: {
       id: string;
       paymentStatus: "PAYMENT_PENDING";
@@ -85,6 +122,7 @@ export async function cancelPendingOrder(
 
     for (const subOrder of subOrders) {
       for (const item of subOrder.items) {
+        restoredItems.push(item);
         await tx.product.update({
           where: { id: item.productId },
           data: { inventoryCount: { increment: item.quantity } },
@@ -104,4 +142,15 @@ export async function cancelPendingOrder(
 
     return true;
   });
+
+  if (success && restoredItems.length > 0) {
+    for (const item of restoredItems) {
+      broadcastRealtimeEvent(`product:stock:${item.productId}`, "stock:updated", {
+        productId: item.productId,
+        delta: item.quantity,
+      });
+    }
+  }
+
+  return success;
 }

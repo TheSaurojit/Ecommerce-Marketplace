@@ -15,8 +15,11 @@ import {
   Truck,
   MessageSquare,
   Heart,
+  Radio,
+  Sparkles,
 } from "lucide-react";
 import { client } from "@/lib/rpc";
+import { useRealtimeSubscription } from "@/hooks/use-realtime";
 
 interface ProductDetailProps {
   product: {
@@ -54,7 +57,32 @@ export function ProductDetailView({ product }: ProductDetailProps) {
   const [selectedImage, setSelectedImage] = useState(0);
   const [quantity, setQuantity] = useState(1);
   const [added, setAdded] = useState(false);
+  const [inventoryCount, setInventoryCount] = useState(product.inventoryCount);
+  const [stockFlash, setStockFlash] = useState<string | null>(null);
   const inWishlist = isInWishlist(product.id);
+
+  // Real-time stock subscription
+  useRealtimeSubscription({
+    topics: [`product:stock:${product.id}`],
+    onEvent: (event, data) => {
+      if (event === "stock:updated") {
+        const payload = (data.payload || data) as Record<string, unknown>;
+        const delta = typeof payload.delta === "number" ? payload.delta : 0;
+        const exactCount = typeof payload.newInventoryCount === "number" ? payload.newInventoryCount : undefined;
+
+        setInventoryCount((prev) => {
+          const next = exactCount !== undefined ? exactCount : Math.max(0, prev + delta);
+          if (delta < 0) {
+            setStockFlash(`Live Update: Someone just purchased ${Math.abs(delta)} unit${Math.abs(delta) > 1 ? "s" : ""}!`);
+          } else if (delta > 0) {
+            setStockFlash(`Live Update: ${delta} unit${delta > 1 ? "s" : ""} restocked!`);
+          }
+          setTimeout(() => setStockFlash(null), 5000);
+          return next;
+        });
+      }
+    },
+  });
 
   // Review Form State
   const [rating, setRating] = useState(5);
@@ -241,37 +269,51 @@ export function ProductDetailView({ product }: ProductDetailProps) {
             {/* Price block */}
             <div className="mt-6 flex items-baseline space-x-3">
               <span className="text-3xl font-extrabold text-gray-900">
-                ₹{product.price.toFixed(2)}
+                â‚¹{product.price.toFixed(2)}
               </span>
               {product.comparePrice && (
                 <>
                   <span className="text-base text-gray-400 line-through">
-                    ₹{product.comparePrice.toFixed(2)}
+                    â‚¹{product.comparePrice.toFixed(2)}
                   </span>
                   <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-md">
-                    Save ₹{(product.comparePrice - product.price).toFixed(2)}
+                    Save â‚¹{(product.comparePrice - product.price).toFixed(2)}
                   </span>
                 </>
               )}
             </div>
 
             {/* Inventory indicator */}
-            <div className="mt-3 flex items-center space-x-2 text-xs">
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
               <span
                 className={`w-2 h-2 rounded-full ${
-                  product.inventoryCount > 5
+                  inventoryCount > 5
                     ? "bg-emerald-500"
-                    : product.inventoryCount > 0
+                    : inventoryCount > 0
                     ? "bg-amber-500"
                     : "bg-red-500"
                 }`}
               />
               <span className="font-semibold text-gray-700">
-                {product.inventoryCount > 0
-                  ? `${product.inventoryCount} units available in stock`
+                {inventoryCount > 0
+                  ? `${inventoryCount} units available in stock`
                   : "Currently Out of Stock"}
               </span>
+
+              <div className="inline-flex items-center space-x-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-semibold">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <Radio className="w-3 h-3 text-emerald-600 animate-pulse" />
+                <span>Live Stock Sync</span>
+              </div>
             </div>
+
+            {/* Flash stock alert */}
+            {stockFlash && (
+              <div className="mt-2 text-xs font-bold text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-xl flex items-center space-x-2 animate-in fade-in duration-300">
+                <Sparkles className="w-3.5 h-3.5 text-amber-600 flex-shrink-0" />
+                <span>{stockFlash}</span>
+              </div>
+            )}
 
             {/* Description */}
             <div className="mt-6 prose prose-sm text-gray-600 border-t border-gray-100 pt-6">
@@ -287,15 +329,15 @@ export function ProductDetailView({ product }: ProductDetailProps) {
                 <button
                   onClick={() => setQuantity(Math.max(1, quantity - 1))}
                   className="px-2.5 py-1 text-gray-600 hover:text-indigo-600 font-bold"
-                  disabled={product.inventoryCount <= 0}
+                  disabled={inventoryCount <= 0}
                 >
                   -
                 </button>
                 <span className="px-3 text-sm font-semibold text-gray-900">{quantity}</span>
                 <button
-                  onClick={() => setQuantity(Math.min(product.inventoryCount, quantity + 1))}
+                  onClick={() => setQuantity(Math.min(inventoryCount, quantity + 1))}
                   className="px-2.5 py-1 text-gray-600 hover:text-indigo-600 font-bold"
-                  disabled={product.inventoryCount <= 0 || quantity >= product.inventoryCount}
+                  disabled={inventoryCount <= 0 || quantity >= inventoryCount}
                 >
                   +
                 </button>
@@ -304,7 +346,7 @@ export function ProductDetailView({ product }: ProductDetailProps) {
               {/* Add to Cart CTA */}
               <button
                 onClick={handleAddToCart}
-                disabled={product.inventoryCount <= 0}
+                disabled={inventoryCount <= 0}
                 className={`flex-1 py-3.5 px-6 rounded-xl font-bold flex items-center justify-center space-x-2 shadow-lg transition-all ${
                   added
                     ? "bg-emerald-600 text-white shadow-emerald-200"
@@ -319,7 +361,7 @@ export function ProductDetailView({ product }: ProductDetailProps) {
                 ) : (
                   <>
                     <ShoppingBag className="w-5 h-5" />
-                    <span>Add to Cart - ₹{(product.price * quantity).toFixed(2)}</span>
+                    <span>Add to Cart - â‚¹{(product.price * quantity).toFixed(2)}</span>
                   </>
                 )}
               </button>

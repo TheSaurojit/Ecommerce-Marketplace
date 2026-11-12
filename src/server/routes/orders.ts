@@ -11,6 +11,7 @@ import {
   stripe,
 } from "@/lib/stripe";
 import { cancelPendingOrder, markOrderPaid } from "../order-lifecycle";
+import { broadcastRealtimeEvent } from "@/lib/realtime";
 
 export const orderRoutes = new Hono<Env>()
   .use("*", sessionMiddleware)
@@ -265,6 +266,14 @@ export const orderRoutes = new Hono<Env>()
           where: { id: parentOrderId },
           data: { stripeSessionId: session.sessionId },
         });
+
+        // Broadcast real-time stock decrements for purchased items
+        for (const item of consolidatedItems) {
+          broadcastRealtimeEvent(`product:stock:${item.productId}`, "stock:updated", {
+            productId: item.productId,
+            delta: -item.quantity,
+          });
+        }
 
         return c.json(
           {
@@ -718,19 +727,67 @@ export const orderRoutes = new Hono<Env>()
         subOrder.status !== "CANCELLED" &&
         subOrder.status !== "REFUNDED";
 
-      // If cancelling/refunding a paid sub-order, issue refund to buyer via Stripe
       if (isCancelling) {
+        // Issue 2: Block cancellation if seller payout has already been transferred
+        const existingPayout = await db.payoutRecord.findUnique({
+          where: { subOrderId },
+        });
+
+        if (existingPayout && existingPayout.status === "TRANSFERRED") {
+          return c.json(
+            {
+              error:
+                "Cannot cancel order: seller payout has already been transferred. Please contact platform support.",
+            },
+            400
+          );
+        }
+
+        // Issue 1: Claim the sub-order atomically first to prevent double refund on concurrent cancel
+        const claimResult = await db.subOrder.updateMany({
+          where: {
+            id: subOrderId,
+            status: { in: ["PROCESSING", "SHIPPED"] },
+          },
+          data: {
+            status: "REFUNDED",
+            ...(trackingNumber ? { trackingNumber } : {}),
+            ...(carrierName ? { carrierName } : {}),
+          },
+        });
+
+        if (claimResult.count !== 1) {
+          return c.json(
+            {
+              error:
+                "Conflict: Sub-order has already been cancelled, refunded, or modified concurrently.",
+            },
+            409
+          );
+        }
+
+        // If cancelling a paid sub-order, issue refund to buyer via Stripe with idempotency key
         if (
           isStripeConfigured() &&
           stripe &&
           subOrder.order.stripePaymentIntentId
         ) {
           try {
-            await stripe.refunds.create({
-              payment_intent: subOrder.order.stripePaymentIntentId,
-              amount: Math.round(Number(subOrder.subtotal) * 100),
-            });
+            await stripe.refunds.create(
+              {
+                payment_intent: subOrder.order.stripePaymentIntentId,
+                amount: Math.round(Number(subOrder.subtotal) * 100),
+              },
+              {
+                idempotencyKey: `refund_${subOrderId}`,
+              }
+            );
           } catch (refundErr: unknown) {
+            // Roll back the atomic claim so order isn't stuck in REFUNDED if refund execution fails
+            await db.subOrder.update({
+              where: { id: subOrderId },
+              data: { status: subOrder.status },
+            });
             console.error("[Stripe Refund Error]:", refundErr);
             return c.json(
               {
@@ -742,13 +799,9 @@ export const orderRoutes = new Hono<Env>()
             );
           }
         }
-      }
 
-      const targetStatus = isCancelling ? "REFUNDED" : status;
-
-      const updated = await db.$transaction(async (tx) => {
-        // If transitioning to CANCELLED/REFUNDED, restore product inventories and void payout record
-        if (isCancelling) {
+        const updated = await db.$transaction(async (tx) => {
+          // Restore product inventories
           for (const item of subOrder.items) {
             await tx.product.update({
               where: { id: item.productId },
@@ -758,21 +811,81 @@ export const orderRoutes = new Hono<Env>()
             });
           }
 
-          // Mark payout as FAILED so vendor won't receive payout for a refunded order
+          // Mark pending payout as FAILED so vendor won't receive payout for a refunded order (never overwrite TRANSFERRED)
           await tx.payoutRecord.updateMany({
-            where: { subOrderId: subOrder.id },
+            where: {
+              subOrderId: subOrder.id,
+              status: "PENDING",
+            },
             data: { status: "FAILED" },
+          });
+
+          return await tx.subOrder.findUniqueOrThrow({
+            where: { id: subOrderId },
+          });
+        });
+
+        // Broadcast real-time refund status to buyer & restocked inventory to product channels
+        broadcastRealtimeEvent(`buyer:orders:${subOrder.order.buyerId}`, "order:status_updated", {
+          subOrderId: subOrder.id,
+          orderId: subOrder.orderId,
+          status: "REFUNDED",
+          trackingNumber: updated.trackingNumber,
+          carrierName: updated.carrierName,
+        });
+
+        for (const item of subOrder.items) {
+          broadcastRealtimeEvent(`product:stock:${item.productId}`, "stock:updated", {
+            productId: item.productId,
+            delta: item.quantity,
           });
         }
 
-        return await tx.subOrder.update({
-          where: { id: subOrderId },
+        return c.json({ success: true, subOrder: updated });
+      }
+
+      // Non-cancelling status transition (e.g. PROCESSING -> SHIPPED, SHIPPED -> DELIVERED)
+      const updated = await db.$transaction(async (tx) => {
+        const claimResult = await tx.subOrder.updateMany({
+          where: {
+            id: subOrderId,
+            status: subOrder.status,
+          },
           data: {
-            status: targetStatus,
+            status,
             ...(trackingNumber ? { trackingNumber } : {}),
             ...(carrierName ? { carrierName } : {}),
           },
         });
+
+        if (claimResult.count !== 1) {
+          throw new Error("CONCURRENT_MODIFICATION");
+        }
+
+        return await tx.subOrder.findUniqueOrThrow({
+          where: { id: subOrderId },
+        });
+      }).catch((err) => {
+        if (err.message === "CONCURRENT_MODIFICATION") {
+          return null;
+        }
+        throw err;
+      });
+
+      if (!updated) {
+        return c.json(
+          { error: "Conflict: Sub-order was modified concurrently." },
+          409
+        );
+      }
+
+      // Broadcast real-time shipment/delivery status to buyer
+      broadcastRealtimeEvent(`buyer:orders:${subOrder.order.buyerId}`, "order:status_updated", {
+        subOrderId: subOrder.id,
+        orderId: subOrder.orderId,
+        status: updated.status,
+        trackingNumber: updated.trackingNumber,
+        carrierName: updated.carrierName,
       });
 
       return c.json({ success: true, subOrder: updated });
@@ -800,6 +913,17 @@ export const orderRoutes = new Hono<Env>()
       return c.json({ error: "Forbidden: You can only cancel your own orders" }, 403);
     }
 
+    // Issue 3: Reject /cancel/:id unless the order is PAID (unpaid orders go through /cancel-checkout)
+    if (subOrder.order.paymentStatus !== "PAID") {
+      return c.json(
+        {
+          error:
+            "Cannot cancel individual items on an unpaid order. To cancel an unpaid order, use /api/orders/cancel-checkout.",
+        },
+        400
+      );
+    }
+
     if (subOrder.status !== "PROCESSING") {
       return c.json(
         { error: `Cannot cancel shipment in "${subOrder.status}" state. Only "PROCESSING" orders can be cancelled.` },
@@ -807,34 +931,75 @@ export const orderRoutes = new Hono<Env>()
       );
     }
 
-    const isPaid = subOrder.order.paymentStatus === "PAID";
+    // Issue 2: Block cancellation if seller payout has already been transferred
+    const existingPayout = await db.payoutRecord.findUnique({
+      where: { subOrderId },
+    });
 
-    if (isPaid) {
-      if (
-        isStripeConfigured() &&
-        stripe &&
-        subOrder.order.stripePaymentIntentId
-      ) {
-        try {
-          await stripe.refunds.create({
-            payment_intent: subOrder.order.stripePaymentIntentId,
-            amount: Math.round(Number(subOrder.subtotal) * 100),
-          });
-        } catch (refundErr: unknown) {
-          console.error("[Stripe Refund Error]:", refundErr);
-          return c.json(
-            {
-              error: `Stripe refund execution failed: ${
-                refundErr instanceof Error ? refundErr.message : "Unknown error"
-              }`,
-            },
-            400
-          );
-        }
-      }
+    if (existingPayout && existingPayout.status === "TRANSFERRED") {
+      return c.json(
+        {
+          error:
+            "Cannot cancel order: seller payout has already been transferred. Please contact platform support.",
+        },
+        400
+      );
     }
 
-    const targetStatus = isPaid ? "REFUNDED" : "CANCELLED";
+    // Issue 1: Claim the sub-order atomically first to prevent double refund on concurrent cancel
+    const claimResult = await db.subOrder.updateMany({
+      where: {
+        id: subOrderId,
+        status: { in: ["PROCESSING"] },
+      },
+      data: {
+        status: "REFUNDED",
+      },
+    });
+
+    if (claimResult.count !== 1) {
+      return c.json(
+        {
+          error:
+            "Conflict: Sub-order has already been cancelled, refunded, or modified concurrently.",
+        },
+        409
+      );
+    }
+
+    // Issue 1: Pass idempotencyKey to Stripe refund
+    if (
+      isStripeConfigured() &&
+      stripe &&
+      subOrder.order.stripePaymentIntentId
+    ) {
+      try {
+        await stripe.refunds.create(
+          {
+            payment_intent: subOrder.order.stripePaymentIntentId,
+            amount: Math.round(Number(subOrder.subtotal) * 100),
+          },
+          {
+            idempotencyKey: `refund_${subOrderId}`,
+          }
+        );
+      } catch (refundErr: unknown) {
+        // Roll back the atomic claim on refund failure
+        await db.subOrder.update({
+          where: { id: subOrderId },
+          data: { status: "PROCESSING" },
+        });
+        console.error("[Stripe Refund Error]:", refundErr);
+        return c.json(
+          {
+            error: `Stripe refund execution failed: ${
+              refundErr instanceof Error ? refundErr.message : "Unknown error"
+            }`,
+          },
+          400
+        );
+      }
+    }
 
     await db.$transaction(async (tx) => {
       // 1. Restore product inventory
@@ -845,41 +1010,39 @@ export const orderRoutes = new Hono<Env>()
         });
       }
 
-      // 2. Mark Sub-Order as REFUNDED (if paid) or CANCELLED (if unpaid)
-      await tx.subOrder.update({
-        where: { id: subOrderId },
-        data: { status: targetStatus },
-      });
-
-      // 3. Mark Payout Record as FAILED
+      // 2. Mark pending Payout Record as FAILED (Issue 2: only if status is PENDING)
       await tx.payoutRecord.updateMany({
-        where: { subOrderId: subOrderId },
+        where: {
+          subOrderId: subOrderId,
+          status: "PENDING",
+        },
         data: { status: "FAILED" },
       });
-
-      // 4. If unpaid, and all sibling sub-orders are also CANCELLED, set order to CANCELLED
-      if (!isPaid) {
-        const remainingActive = await tx.subOrder.count({
-          where: {
-            orderId: subOrder.orderId,
-            status: { notIn: ["CANCELLED", "REFUNDED"] },
-          },
-        });
-
-        if (remainingActive === 0) {
-          await tx.order.update({
-            where: { id: subOrder.orderId },
-            data: { paymentStatus: "CANCELLED" },
-          });
-        }
-      }
     });
+
+    // Broadcast real-time refund status to buyer, cancellation to seller, and stock restore to products
+    broadcastRealtimeEvent(`buyer:orders:${subOrder.order.buyerId}`, "order:status_updated", {
+      subOrderId: subOrder.id,
+      orderId: subOrder.orderId,
+      status: "REFUNDED",
+    });
+
+    broadcastRealtimeEvent(`seller:orders:${subOrder.sellerId}`, "order:cancelled", {
+      subOrderId: subOrder.id,
+      orderId: subOrder.orderId,
+      status: "REFUNDED",
+    });
+
+    for (const item of subOrder.items) {
+      broadcastRealtimeEvent(`product:stock:${item.productId}`, "stock:updated", {
+        productId: item.productId,
+        delta: item.quantity,
+      });
+    }
 
     return c.json({
       success: true,
-      message: isPaid
-        ? "Order cancelled and refunded successfully. Inventory restored."
-        : "Order cancelled and inventory restored.",
+      message: "Order cancelled and refunded successfully. Inventory restored.",
     });
   })
 
