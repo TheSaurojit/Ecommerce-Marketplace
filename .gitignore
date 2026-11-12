@@ -49,6 +49,8 @@ src/generated
 .windsurf/
 skills-lock.json
 .codex/
-.github/
+.github/hooks/
+.github/agents/
+.github/skills/
 src/generated
 
