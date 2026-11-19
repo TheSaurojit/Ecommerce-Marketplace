@@ -766,6 +766,32 @@ export const orderRoutes = new Hono<Env>()
           );
         }
 
+        // Atomic Payout Claim: Claim the payout atomically BEFORE issuing the Stripe refund.
+        // If count === 0 while a payout exists, abort and revert the subOrder claim.
+        if (existingPayout) {
+          const payoutClaim = await db.payoutRecord.updateMany({
+            where: {
+              subOrderId,
+              status: "PENDING",
+            },
+            data: { status: "FAILED" },
+          });
+
+          if (payoutClaim.count === 0) {
+            await db.subOrder.update({
+              where: { id: subOrderId },
+              data: { status: subOrder.status },
+            });
+            return c.json(
+              {
+                error:
+                  "Conflict: Seller payout is no longer pending or has already been transferred.",
+              },
+              409
+            );
+          }
+        }
+
         // If cancelling a paid sub-order, issue refund to buyer via Stripe with idempotency key
         if (
           isStripeConfigured() &&
@@ -783,11 +809,17 @@ export const orderRoutes = new Hono<Env>()
               }
             );
           } catch (refundErr: unknown) {
-            // Roll back the atomic claim so order isn't stuck in REFUNDED if refund execution fails
+            // Roll back the atomic claims so order/payout isn't stuck if refund execution fails
             await db.subOrder.update({
               where: { id: subOrderId },
               data: { status: subOrder.status },
             });
+            if (existingPayout) {
+              await db.payoutRecord.updateMany({
+                where: { subOrderId, status: "FAILED" },
+                data: { status: "PENDING" },
+              });
+            }
             console.error("[Stripe Refund Error]:", refundErr);
             return c.json(
               {
@@ -810,15 +842,6 @@ export const orderRoutes = new Hono<Env>()
               },
             });
           }
-
-          // Mark pending payout as FAILED so vendor won't receive payout for a refunded order (never overwrite TRANSFERRED)
-          await tx.payoutRecord.updateMany({
-            where: {
-              subOrderId: subOrder.id,
-              status: "PENDING",
-            },
-            data: { status: "FAILED" },
-          });
 
           return await tx.subOrder.findUniqueOrThrow({
             where: { id: subOrderId },
@@ -967,6 +990,32 @@ export const orderRoutes = new Hono<Env>()
       );
     }
 
+    // Atomic Payout Claim: Claim the payout atomically BEFORE issuing the Stripe refund.
+    // If count === 0 while a payout exists, abort and revert the sub-order claim.
+    if (existingPayout) {
+      const payoutClaim = await db.payoutRecord.updateMany({
+        where: {
+          subOrderId,
+          status: "PENDING",
+        },
+        data: { status: "FAILED" },
+      });
+
+      if (payoutClaim.count === 0) {
+        await db.subOrder.update({
+          where: { id: subOrderId },
+          data: { status: "PROCESSING" },
+        });
+        return c.json(
+          {
+            error:
+              "Conflict: Seller payout is no longer pending or has already been transferred.",
+          },
+          409
+        );
+      }
+    }
+
     // Issue 1: Pass idempotencyKey to Stripe refund
     if (
       isStripeConfigured() &&
@@ -984,11 +1033,17 @@ export const orderRoutes = new Hono<Env>()
           }
         );
       } catch (refundErr: unknown) {
-        // Roll back the atomic claim on refund failure
+        // Roll back the atomic claims on refund failure
         await db.subOrder.update({
           where: { id: subOrderId },
           data: { status: "PROCESSING" },
         });
+        if (existingPayout) {
+          await db.payoutRecord.updateMany({
+            where: { subOrderId, status: "FAILED" },
+            data: { status: "PENDING" },
+          });
+        }
         console.error("[Stripe Refund Error]:", refundErr);
         return c.json(
           {
@@ -1009,15 +1064,6 @@ export const orderRoutes = new Hono<Env>()
           data: { inventoryCount: { increment: item.quantity } },
         });
       }
-
-      // 2. Mark pending Payout Record as FAILED (Issue 2: only if status is PENDING)
-      await tx.payoutRecord.updateMany({
-        where: {
-          subOrderId: subOrderId,
-          status: "PENDING",
-        },
-        data: { status: "FAILED" },
-      });
     });
 
     // Broadcast real-time refund status to buyer, cancellation to seller, and stock restore to products

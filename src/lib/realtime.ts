@@ -39,21 +39,30 @@ export function broadcastRealtimeEvent(
   realtimeBus.emit("message", message);
   realtimeBus.emit(topic, message);
 
-  // 2. Dual-publish to Supabase Realtime channel if Supabase is active
+  // 2. Primary Distributed Transport: Publish to Supabase Realtime Private Channel
   if (isSupabaseAdminConfigured() && supabaseAdmin) {
     try {
-      const channel = supabaseAdmin.channel(topic);
-      channel
-        .send({
-          type: "broadcast",
-          event,
-          payload: message,
-        })
-        .catch(() => {
-          // Safe no-op if Supabase network is unavailable
-        });
-    } catch {
-      // Safe no-op
+      const channel = supabaseAdmin.channel(topic, {
+        config: {
+          private: true,
+        },
+      });
+
+      const chAny = channel as unknown as { httpSend?: (event: string, payload: unknown) => Promise<unknown> };
+      const sendPromise = typeof chAny.httpSend === "function"
+        ? chAny.httpSend(event, message)
+        : channel.send({
+            type: "broadcast",
+            event,
+            payload: message,
+          });
+
+      sendPromise.catch((err: unknown) => {
+        const errorRecord = typeof err === "object" && err !== null ? (err as Record<string, unknown>) : null;
+        console.warn(`[Realtime Broadcast Error on ${topic}]:`, errorRecord?.message || err);
+      });
+    } catch (err) {
+      console.warn(`[Realtime Channel Error on ${topic}]:`, err);
     }
   }
 }

@@ -2,9 +2,34 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { getCookie } from "hono/cookie";
 import { realtimeBus, RealtimeMessage } from "@/lib/realtime";
-import { verifySession, COOKIE_NAME } from "../auth";
+import { verifySession, COOKIE_NAME, signRealtimeToken } from "../auth";
+import { sessionMiddleware, Env } from "../middleware/auth";
 
-export const realtimeRoutes = new Hono().get("/events", async (c) => {
+export const realtimeRoutes = new Hono<Env>()
+  .use("*", sessionMiddleware)
+
+  // 1. Issue signed token for Supabase Realtime Authorization (Private Channels)
+  .get("/token", async (c) => {
+    const session = c.get("user");
+    if (!session) {
+      return c.json({ token: null });
+    }
+
+    try {
+      const token = await signRealtimeToken({
+        userId: session.userId,
+        role: session.role,
+        sellerProfileId: session.sellerProfileId,
+      });
+      return c.json({ token });
+    } catch (err: unknown) {
+      console.error("[Realtime Token Generation Error]:", err);
+      return c.json({ error: "Failed to generate realtime token" }, 500);
+    }
+  })
+
+  // 2. Server-Sent Events (SSE) fallback stream
+  .get("/events", async (c) => {
   const topicsParam = c.req.query("topics") || c.req.query("topic") || "";
   const requestedTopics = topicsParam
     .split(",")

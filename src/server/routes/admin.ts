@@ -361,6 +361,26 @@ export const adminRoutes = new Hono<Env>()
 
       // When transitioning to TRANSFERRED: execute real Stripe transfer if Connect account exists
       if (status === "TRANSFERRED" && !transferId) {
+        // Atomically claim the payout first to prevent race with in-flight refund
+        const claimResult = await db.payoutRecord.updateMany({
+          where: {
+            id: existing.id,
+            status: "PENDING",
+          },
+          data: {
+            status: "TRANSFERRED",
+          },
+        });
+
+        if (claimResult.count === 0) {
+          return c.json(
+            {
+              error: "Conflict: Payout has already been processed, cancelled, or status changed concurrently.",
+            },
+            409
+          );
+        }
+
         if (
           isStripeConfigured() &&
           stripe &&
@@ -381,7 +401,16 @@ export const adminRoutes = new Hono<Env>()
               }
             );
             transferId = transfer.id;
+            await db.payoutRecord.update({
+              where: { id: existing.id },
+              data: { stripeTransferId: transferId },
+            });
           } catch (stripeErr: unknown) {
+            // Revert payout back to PENDING on Stripe failure
+            await db.payoutRecord.update({
+              where: { id: existing.id },
+              data: { status: "PENDING" },
+            });
             console.error("[Stripe Connect Transfer Error]:", stripeErr);
             return c.json(
               {
@@ -395,28 +424,32 @@ export const adminRoutes = new Hono<Env>()
         } else {
           // Authoritative server-side ledger reference for manual/offline bank transfers
           transferId = `manual_disb_${existing.id}_${Date.now().toString(36)}`;
+          await db.payoutRecord.update({
+            where: { id: existing.id },
+            data: { stripeTransferId: transferId },
+          });
         }
-      }
-
-      // Atomic conditional update: only update if status is still PENDING
-      const updateResult = await db.payoutRecord.updateMany({
-        where: {
-          id: existing.id,
-          status: "PENDING",
-        },
-        data: {
-          status,
-          ...(transferId ? { stripeTransferId: transferId } : {}),
-        },
-      });
-
-      if (updateResult.count === 0) {
-        return c.json(
-          {
-            error: "Conflict: Payout has already been processed or status changed concurrently.",
+      } else {
+        // Atomic conditional update for status === "FAILED" or explicit transferId provided
+        const updateResult = await db.payoutRecord.updateMany({
+          where: {
+            id: existing.id,
+            status: "PENDING",
           },
-          409
-        );
+          data: {
+            status,
+            ...(transferId ? { stripeTransferId: transferId } : {}),
+          },
+        });
+
+        if (updateResult.count === 0) {
+          return c.json(
+            {
+              error: "Conflict: Payout has already been processed or status changed concurrently.",
+            },
+            409
+          );
+        }
       }
 
       const updated = await db.payoutRecord.findUnique({

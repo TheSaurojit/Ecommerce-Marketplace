@@ -11,10 +11,14 @@ A full-stack, multi-vendor marketplace platform built with **Next.js 16 (App Rou
   - **Seller**: Storefront customization (banner, logo, bio), product & inventory management, order fulfillment, and revenue analytics.
   - **Admin**: Review & approve/reject seller store applications, platform-wide commission management, store suspension, and analytics.
 - **Modern API Layer**: [Hono](https://hono.dev/) mounted seamlessly within Next.js App Router (`/api/[[...route]]`) with strict Zod schema validation.
+- **Real-Time Live Updates**: Universal in-process Server-Sent Events (SSE) bus (`/api/realtime/events`) with optional Supabase Realtime broadcast bridge:
+  - **Buyer**: Live order and shipment tracking on `/orders` (instant transitions to `SHIPPED` with carrier and tracking info without page reloads).
+  - **Seller**: Instant order dispatch feed on `/seller` (real-time alerts when payments are confirmed or orders cancelled, with live metric refreshes).
+  - **Public**: Real-time stock sync & flash purchase alerts on Product Details (`/products/[slug]`).
 - **Robust Database**: PostgreSQL orchestrated via Docker Compose, modeled with Prisma ORM 7 using the PostgreSQL driver adapter (`@prisma/adapter-pg`).
 - **Authentication**: Stateless JWT token authentication with role-based route protection (`ADMIN`, `SELLER`, `BUYER`).
 - **Payment Processing**: Stripe Checkout integration supporting split orders across multiple vendors, with webhook handling.
-- **Media Storage**: Supabase Storage integration for uploading high-resolution product images, store banners, and logos.
+- **Media Storage & Realtime**: Supabase Storage for product images and store banners, with optional Supabase Realtime Channels for distributed WebSocket broadcasts.
 
 ---
 
@@ -23,6 +27,7 @@ A full-stack, multi-vendor marketplace platform built with **Next.js 16 (App Rou
 - **Framework**: [Next.js 16](https://nextjs.org/) (App Router & Turbopack)
 - **UI / Library**: [React 19](https://react.dev/), [Tailwind CSS v4](https://tailwindcss.com/), [Lucide React](https://lucide.dev/), [Recharts](https://recharts.org/)
 - **API Framework**: [Hono](https://hono.dev/) + `@hono/zod-validator` + [Zod](https://zod.dev/)
+- **Real-Time Engine**: Server-Sent Events (SSE via Hono `streamSSE`) + in-process event bus + optional Supabase Realtime Channels
 - **ORM & Database**: [Prisma ORM 7](https://www.prisma.io/) + [PostgreSQL 16](https://www.postgresql.org/)
 - **Containerization**: [Docker](https://www.docker.com/) & Docker Compose
 - **Authentication**: [Jose](https://github.com/panva/jose) (JWT) + [Bcrypt.js](https://github.com/dcodeIO/bcrypt.js)
@@ -147,10 +152,71 @@ The seed script creates ready-to-use accounts for each user role:
 | `STRIPE_SECRET_KEY` | Stripe secret API key (Test mode) | `sk_test_...` |
 | `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | Stripe publishable API key (Test mode) | `pk_test_...` |
 | `STRIPE_WEBHOOK_SECRET` | Webhook secret for Stripe event validation | `whsec_...` |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL for cloud storage | `https://<project-id>.supabase.co` |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`| Supabase public anon key | `sb_publishable_...` |
-| `SUPABASE_SECRET_KEY` | Supabase service role secret key | `sb_secret_...` |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL (Cloud storage & realtime) | `https://<project-id>.supabase.co` |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`| Supabase public anon key (Storage & private realtime channels) | `sb_publishable_...` |
+| `SUPABASE_SECRET_KEY` | Supabase service role secret key (Server-side storage & broadcast) | `sb_secret_...` |
+| `SUPABASE_JWT_SECRET` | Supabase project JWT secret (API > JWT Settings) for Realtime Auth | `your-supabase-jwt-secret` |
 | `SUPABASE_STORAGE_BUCKET` | Supabase storage bucket name | `marketplace-images` |
+
+> [!NOTE]
+> **Real-Time Transport Architecture**: When deployed in serverless environments (e.g. Vercel), the application uses **Supabase Realtime Private Channels** as the primary transport to eliminate in-process event loss. In offline/local environments without Supabase credentials, it automatically falls back to the built-in Server-Sent Events (SSE) bus (`/api/realtime/events`). See below for Supabase Realtime Authorization setup.
+
+---
+
+### ⚡ Supabase Realtime Authorization Setup
+
+To enable secure private realtime channels on Supabase:
+
+1. **Configure JWT Secret**:
+   - In Supabase Dashboard, go to **Project Settings > API > JWT Settings**.
+   - Copy your **JWT Secret** and set `SUPABASE_JWT_SECRET="<secret>"` in your `.env` and Vercel project environment variables.
+
+2. **Execute RLS Policies in Supabase SQL Editor**:
+   Run the following SQL snippet in your Supabase SQL Editor to authorize private channels on `realtime.messages`:
+
+   ```sql
+   -- 1. Public stock updates: anyone (authenticated or anonymous) can receive live stock updates
+   CREATE POLICY "Public stock topic is readable by all"
+   ON realtime.messages
+   FOR SELECT
+   TO authenticated, anon
+   USING (
+     realtime.topic() LIKE 'product:stock:%'
+   );
+
+   -- 2. Buyer orders: authenticated buyers can only read their own order topics
+   CREATE POLICY "Buyers can read their own order topics"
+   ON realtime.messages
+   FOR SELECT
+   TO authenticated
+   USING (
+     realtime.topic() = ('buyer:orders:' || (auth.jwt()->>'userId'))
+     OR (auth.jwt()->>'userRole') = 'ADMIN'
+   );
+
+   -- 3. Seller orders: authenticated sellers can only read their own store topics
+   CREATE POLICY "Sellers can read their own store order topics"
+   ON realtime.messages
+   FOR SELECT
+   TO authenticated
+   USING (
+     realtime.topic() = ('seller:orders:' || (auth.jwt()->>'sellerProfileId'))
+     OR (auth.jwt()->>'userRole') = 'ADMIN'
+   );
+
+   -- 4. Admin alerts: platform admins can read admin alerts
+   CREATE POLICY "Admins can read admin alerts"
+   ON realtime.messages
+   FOR SELECT
+   TO authenticated
+   USING (
+     realtime.topic() = 'admin:alerts'
+     AND (auth.jwt()->>'userRole') = 'ADMIN'
+   );
+
+   -- Note: No INSERT policy is created for authenticated or anon roles.
+   -- Only the backend server (using SUPABASE_SECRET_KEY / service_role) can broadcast events.
+   ```
 
 ---
 
@@ -162,7 +228,7 @@ The seed script creates ready-to-use accounts for each user role:
 | `npm run build` | Compiles the production build |
 | `npm run start` | Starts the production server |
 | `npm run lint` | Runs ESLint check across all files |
-| `npm test` | Runs the Vitest integration test suite (checkout, pay, cancel lifecycle) |
+| `npm test` | Runs the Vitest integration test suite (order lifecycle, payments, refunds, and real-time SSE streams) |
 | `npm run db:migrate` | Creates and applies new migrations during development (`prisma migrate dev`) |
 | `npm run db:deploy` | Applies all pending migrations in production / CI (`prisma migrate deploy`) |
 | `npm run db:reset` | Drops, recreates, runs migrations, and seeds the dev database (`prisma migrate reset`) |
@@ -185,20 +251,21 @@ The seed script creates ready-to-use accounts for each user role:
 │   │   ├── (auth)/             # Login and Registration routes
 │   │   ├── admin/              # Admin dashboard & seller approval management
 │   │   ├── checkout/           # Checkout flow & Stripe redirect handlers
-│   │   ├── orders/             # Customer order history
+│   │   ├── orders/             # Customer order history (with real-time shipment updates)
 │   │   ├── products/           # Product listings, filters, and dynamic [slug] details
-│   │   ├── seller/             # Seller dashboard, inventory manager, and store settings
+│   │   ├── seller/             # Seller dashboard & live order dispatch notifications
 │   │   ├── stores/             # Public vendor storefronts ([slug])
 │   │   ├── wishlist/           # Customer saved products
 │   │   └── api/                # Next.js API route handlers
-│   │       ├── [[...route]]/   # Hono API router mount point
+│   │       ├── [[...route]]/   # Hono API router mount point (/api/realtime/events, etc.)
 │   │       └── webhooks/stripe # Stripe webhook listener
-│   ├── components/             # Reusable UI components (Navbar, Footer, Modals, Cards)
+│   ├── components/             # Reusable UI components (Navbar, Footer, Modals, Cards, PDP)
 │   ├── context/                # React Context providers (Auth, Cart, Wishlist)
-│   ├── lib/                    # Database client, auth utils, and Supabase client
+│   ├── hooks/                  # Custom hooks (useRealtimeSubscription)
+│   ├── lib/                    # Database client, auth utils, realtime event bus, Supabase client
 │   └── server/                 # Hono API backend logic
 │       ├── middleware/         # Auth and role-checking middlewares
-│       └── routes/             # Endpoints (auth, products, orders, stores, admin, upload)
+│       └── routes/             # Endpoints (auth, products, orders, stores, admin, upload, realtime)
 └── public/                     # Static assets & icons
 ```
 

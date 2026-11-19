@@ -72,3 +72,27 @@ export async function getCurrentUser(): Promise<SessionPayload | null> {
     storeStatus: dbUser.sellerProfile?.status,
   };
 }
+
+export async function signRealtimeToken(payload: {
+  userId: string;
+  role: "BUYER" | "SELLER" | "ADMIN";
+  sellerProfileId?: string;
+}): Promise<string> {
+  const secret = process.env.SUPABASE_JWT_SECRET || process.env.JWT_SECRET;
+  if (!secret || secret.trim().length === 0) {
+    throw new Error("FATAL: JWT secret is missing.");
+  }
+
+  return new SignJWT({
+    sub: payload.userId,
+    role: "authenticated",
+    userId: payload.userId,
+    sellerProfileId: payload.sellerProfileId || "",
+    userRole: payload.role,
+    iss: "supabase",
+  })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setExpirationTime("24h")
+    .sign(new TextEncoder().encode(secret));
+}
