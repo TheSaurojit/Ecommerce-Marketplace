@@ -78,13 +78,26 @@ export async function signRealtimeToken(payload: {
   role: "BUYER" | "SELLER" | "ADMIN";
   sellerProfileId?: string;
 }): Promise<string> {
-  const secret = process.env.SUPABASE_JWT_SECRET || process.env.JWT_SECRET;
-  if (!secret || secret.trim().length === 0) {
-    throw new Error("FATAL: JWT secret is missing.");
+  const rawSecret = process.env.SUPABASE_JWT_SECRET;
+  if (!rawSecret || rawSecret.trim().length === 0) {
+    throw new Error(
+      "SUPABASE_JWT_SECRET is missing. Cannot sign tokens for Supabase Realtime without the Supabase Project JWT Secret."
+    );
+  }
+
+  const secret = rawSecret.trim().replace(/^["']|["']$/g, "");
+
+  // Detect if user supplied a Key ID (UUID) from Supabase's Asymmetric Signing Keys architecture
+  const isUuidKeyId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(secret);
+  if (isUuidKeyId) {
+    throw new Error(
+      "SUPABASE_JWT_SECRET is set to an Asymmetric Key ID (UUID), not a symmetric shared secret. Your Supabase project uses Asymmetric Signing Keys (RS256/ES256). Authenticated channels will use the authenticated SSE transport."
+    );
   }
 
   return new SignJWT({
     sub: payload.userId,
+    aud: "authenticated",
     role: "authenticated",
     userId: payload.userId,
     sellerProfileId: payload.sellerProfileId || "",

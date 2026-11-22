@@ -269,15 +269,15 @@ export function ProductDetailView({ product }: ProductDetailProps) {
             {/* Price block */}
             <div className="mt-6 flex items-baseline space-x-3">
               <span className="text-3xl font-extrabold text-gray-900">
-                â‚¹{product.price.toFixed(2)}
+                ₹{product.price.toFixed(2)}
               </span>
               {product.comparePrice && (
                 <>
                   <span className="text-base text-gray-400 line-through">
-                    â‚¹{product.comparePrice.toFixed(2)}
+                    ₹{product.comparePrice.toFixed(2)}
                   </span>
                   <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-md">
-                    Save â‚¹{(product.comparePrice - product.price).toFixed(2)}
+                    Save ₹{(product.comparePrice - product.price).toFixed(2)}
                   </span>
                 </>
               )}
@@ -361,7 +361,7 @@ export function ProductDetailView({ product }: ProductDetailProps) {
                 ) : (
                   <>
                     <ShoppingBag className="w-5 h-5" />
-                    <span>Add to Cart - â‚¹{(product.price * quantity).toFixed(2)}</span>
+                    <span>Add to Cart - ₹{(product.price * quantity).toFixed(2)}</span>
                   </>
                 )}
               </button>

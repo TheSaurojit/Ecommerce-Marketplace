@@ -1,3 +1,6 @@
+# Demo URL
+https://ecommerce-marketplace-flax.vercel.app/
+
 # 🛒 Multi-Vendor E-Commerce Marketplace
 
 A full-stack, multi-vendor marketplace platform built with **Next.js 16 (App Router)**, **React 19**, **TypeScript**, **Tailwind CSS v4**, **Prisma ORM 7**, **PostgreSQL**, **Hono**, and **Stripe**.

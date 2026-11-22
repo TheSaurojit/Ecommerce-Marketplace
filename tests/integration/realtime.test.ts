@@ -1,10 +1,27 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll } from "vitest";
 import { app } from "@/server";
 import { realtimeBus, broadcastRealtimeEvent } from "@/lib/realtime";
 import { signSession } from "@/server/auth";
+import { db } from "@/lib/db";
 
 describe("Real-Time Event Streaming & Broadcast Hub", () => {
+  let testUser: any;
+
+  beforeAll(async () => {
+    testUser = await db.user.findFirst();
+    if (!testUser) {
+      testUser = await db.user.create({
+        data: {
+          name: "Realtime Test User",
+          email: `realtime_test_${Date.now()}@test.com`,
+          passwordHash: "dummy",
+          role: "BUYER",
+        },
+      });
+    }
+  });
+
   beforeEach(() => {
     realtimeBus.removeAllListeners();
   });
@@ -131,5 +148,85 @@ describe("Real-Time Event Streaming & Broadcast Hub", () => {
     expect(liveText).toContain('"newInventoryCount":15');
 
     await reader?.cancel();
+  });
+
+  it("5. GET /api/realtime/token fails loudly with 500 when SUPABASE_JWT_SECRET is missing", async () => {
+    const originalSecret = process.env.SUPABASE_JWT_SECRET;
+    delete process.env.SUPABASE_JWT_SECRET;
+
+    const buyerToken = await signSession({
+      userId: testUser.id,
+      email: testUser.email,
+      role: testUser.role,
+    });
+
+    const res = await app.request("/api/realtime/token", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${buyerToken}`,
+      },
+    });
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("SUPABASE_JWT_SECRET is missing");
+
+    if (originalSecret !== undefined) {
+      process.env.SUPABASE_JWT_SECRET = originalSecret;
+    }
+  });
+
+  it("6. GET /api/realtime/token issues a valid Supabase-compatible JWT when SUPABASE_JWT_SECRET is set", async () => {
+    process.env.SUPABASE_JWT_SECRET = "test-supabase-jwt-secret-minimum-32-chars-long";
+
+    const buyerToken = await signSession({
+      userId: testUser.id,
+      email: testUser.email,
+      role: testUser.role,
+    });
+
+    const res = await app.request("/api/realtime/token", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${buyerToken}`,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { token?: string };
+    expect(body.token).toBeDefined();
+
+    const { jwtVerify } = await import("jose");
+    const { payload } = await jwtVerify(
+      body.token!,
+      new TextEncoder().encode(process.env.SUPABASE_JWT_SECRET)
+    );
+
+    expect(payload.sub).toBe(testUser.id);
+    expect(payload.aud).toBe("authenticated");
+    expect(payload.role).toBe("authenticated");
+    expect(payload.userId).toBe(testUser.id);
+    expect(payload.userRole).toBe(testUser.role);
+  });
+
+  it("7. GET /api/realtime/token rejects UUID Key IDs with 500 explaining Asymmetric Signing Keys", async () => {
+    process.env.SUPABASE_JWT_SECRET = "f594efe3-5111-4222-8333-abcdef123456";
+
+    const buyerToken = await signSession({
+      userId: testUser.id,
+      email: testUser.email,
+      role: testUser.role,
+    });
+
+    const res = await app.request("/api/realtime/token", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${buyerToken}`,
+      },
+    });
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("Asymmetric Key ID");
   });
 });

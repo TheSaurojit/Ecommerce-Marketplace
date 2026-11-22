@@ -23,8 +23,9 @@ export const realtimeRoutes = new Hono<Env>()
       });
       return c.json({ token });
     } catch (err: unknown) {
-      console.error("[Realtime Token Generation Error]:", err);
-      return c.json({ error: "Failed to generate realtime token" }, 500);
+      const errorMessage = err instanceof Error ? err.message : "Failed to generate realtime token";
+      console.error("[Realtime Token Generation Error]:", errorMessage);
+      return c.json({ error: errorMessage }, 500);
     }
   })
 
